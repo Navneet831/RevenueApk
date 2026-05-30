@@ -1709,44 +1709,6 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                             .padding(12.dp),
                                         verticalArrangement = Arrangement.spacedBy(12.dp)
                                     ) {
-                                        // Header Row at the top of the Page
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Column {
-                                                Text(
-                                                    text = "ANALYTICS & INTENSITY HUB",
-                                                    fontSize = 11.sp,
-                                                    fontWeight = FontWeight.Black,
-                                                    color = BrandGreen,
-                                                    letterSpacing = 1.5.sp
-                                                )
-                                                Text(
-                                                    text = if (pageTwoShowVisuals) "Interactive dynamic trend vectors" else "Vertical month pacing matrix & quarters",
-                                                    fontSize = 8.sp,
-                                                    color = SlateTextMuted
-                                                )
-                                            }
-
-                                            // Small elevated toggle button 
-                                            IconButton(
-                                                onClick = { pageTwoShowVisuals = !pageTwoShowVisuals },
-                                                modifier = Modifier
-                                                    .size(36.dp)
-                                                    .background(BrandGreen.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
-                                                    .border(1.dp, BrandGreen.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
-                                            ) {
-                                                Icon(
-                                                    imageVector = if (pageTwoShowVisuals) Icons.Default.GridOn else Icons.Default.ShowChart,
-                                                    contentDescription = "Switch to ${if (pageTwoShowVisuals) "Table" else "Visuals"}",
-                                                    tint = BrandGreen,
-                                                    modifier = Modifier.size(18.dp)
-                                                )
-                                            }
-                                        }
-
                                         // Flipping container using Crossfade
                                         Crossfade(
                                             targetState = pageTwoShowVisuals,
@@ -1894,7 +1856,7 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                                         ) {
                                                             Column(modifier = Modifier.weight(1f)) {
                                                                 Text(
-                                                                    text = "EXECUTIVE REVENUE MATRICES",
+                                                                    text = "REVENUE MATRIX",
                                                                     fontSize = 10.sp,
                                                                     fontWeight = FontWeight.Black,
                                                                     color = SlateTextLight,
@@ -1925,6 +1887,7 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                                             items = currentStats.matrix,
                                                             currentMonth = filters.matrixMonth,
                                                             currentQuarter = filters.selectedQuarter,
+                                                            selectedFY = filters.selectedFY,
                                                             onMonthSelected = { viewModel.toggleMatrixMonth(it) },
                                                             onQuarterSelected = { viewModel.toggleMatrixQuarter(it) }
                                                         )
@@ -2880,16 +2843,47 @@ fun PacingCellValue(value: Double?, modifier: Modifier = Modifier) {
     }
 }
 
+fun getMonthLabelWithYear(monthAbbr: String, selectedFY: String): String {
+    val parts = selectedFY.split("-")
+    val fullMonth = when (monthAbbr.lowercase()) {
+        "apr" -> "April"
+        "may" -> "May"
+        "jun" -> "June"
+        "jul" -> "July"
+        "aug" -> "August"
+        "sep" -> "September"
+        "oct" -> "October"
+        "nov" -> "November"
+        "dec" -> "December"
+        "jan" -> "January"
+        "feb" -> "February"
+        "mar" -> "March"
+        else -> monthAbbr.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString() }
+    }
+    if (parts.size < 2) return fullMonth
+    val startYearFull = parts[0].toIntOrNull() ?: 2025
+    val startYr2Digit = startYearFull % 100
+    val endYr2Digit = parts[1].toIntOrNull() ?: ((startYearFull + 1) % 100)
+    
+    val mLower = monthAbbr.lowercase()
+    val isLaterPart = mLower == "jan" || mLower == "feb" || mLower == "mar"
+    val yrSuffix = if (isLaterPart) endYr2Digit else startYr2Digit
+    return "$fullMonth $yrSuffix"
+}
+
 @Composable
 fun MatrixTableView(
     items: List<MatrixRowItem>,
     currentMonth: String?,
     currentQuarter: Int?,
+    selectedFY: String,
     onMonthSelected: (String) -> Unit,
     onQuarterSelected: (Int) -> Unit
 ) {
     val monthlyItems = items.filter { it.monthName != "Total" }
     val totalRow = items.find { it.monthName == "Total" }
+    val scrollState = rememberScrollState()
+    val scope = rememberCoroutineScope()
 
     Row(
         modifier = Modifier
@@ -2898,9 +2892,9 @@ fun MatrixTableView(
             .border(1.dp, SlateBorder, RoundedCornerShape(12.dp))
             .padding(12.dp)
     ) {
-        // Sticky description row titles on the left
+        // Sticky description row titles on the left - Perfectly fit label text comfortably on one line
         Column(
-            modifier = Modifier.width(105.dp)
+            modifier = Modifier.width(92.dp)
         ) {
             // Header Space
             Box(
@@ -2910,26 +2904,27 @@ fun MatrixTableView(
                 contentAlignment = Alignment.CenterStart
             ) {
                 Text(
-                    text = "METRIC INDICATORS",
+                    text = "METRICS",
                     fontSize = 7.5.sp,
                     fontWeight = FontWeight.Black,
                     color = SlateTextMuted,
-                    letterSpacing = 0.5.sp
+                    letterSpacing = 0.5.sp,
+                    lineHeight = 10.sp
                 )
             }
             Spacer(modifier = Modifier.height(4.dp))
             
             // Revenue Label
             Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.CenterStart) {
-                Text("REVENUE (₹ Cr)", fontSize = 8.sp, fontWeight = FontWeight.Black, color = SlateTextLight)
+                Text("REVENUE (₹ Cr)", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextLight)
             }
             // Volume Label
             Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.CenterStart) {
-                Text("VOLUME (MW)", fontSize = 8.sp, fontWeight = FontWeight.Black, color = SlateTextLight)
+                Text("VOLUME (MW)", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextLight)
             }
             // Qty Label
             Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.CenterStart) {
-                Text("CELLS QTY (K)", fontSize = 8.sp, fontWeight = FontWeight.Black, color = SlateTextLight)
+                Text("CELLS QTY (K)", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextLight)
             }
             
             // Space & Divider
@@ -2939,15 +2934,15 @@ fun MatrixTableView(
 
             // MoM Label
             Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.CenterStart) {
-                Text("MoM PACING", fontSize = 8.sp, fontWeight = FontWeight.Black, color = SlateTextMuted)
+                Text("MoM PACING", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted)
             }
             // QoQ Label
             Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.CenterStart) {
-                Text("QoQ PACING", fontSize = 8.sp, fontWeight = FontWeight.Black, color = SlateTextMuted)
+                Text("QoQ PACING", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted)
             }
             // YoY Label
             Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.CenterStart) {
-                Text("YoY PACING", fontSize = 8.sp, fontWeight = FontWeight.Black, color = SlateTextMuted)
+                Text("YoY PACING", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted)
             }
         }
 
@@ -2957,21 +2952,24 @@ fun MatrixTableView(
         BoxWithConstraints(
             modifier = Modifier.weight(1f)
         ) {
-            // Adaptive month column width:
-            // On compact screens (phones), show exactly 1 month column completely (and hide others behind scroll with subtle peek).
-            // On larger screens (tablets/landscape), show 2 or more columns completely.
-            val columnWidth = when {
-                maxWidth < 310.dp -> maxWidth - 16.dp
-                maxWidth < 500.dp -> (maxWidth - 24.dp) / 2f
-                maxWidth < 750.dp -> (maxWidth - 32.dp) / 3f
-                else -> (maxWidth - 40.dp) / 4f
-            }
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
+            // High fidelity adaptive layout mathematics:
+            // Ensures columns are spaced cleanly and scroll smoothly if too many columns exist.
+            // Minimum width of 100.dp guarantees ample spacing for longer numbers and labels.
+            val totalCols = monthlyItems.size + (if (totalRow != null) 1 else 0)
+            val spacing = 6.dp
+            val spacingSpacing = spacing * (totalCols - 1)
+            val availableWidth = maxWidth - spacingSpacing
+            val minColWidth = 100.dp
+            val calculatedColWidth = if (totalCols > 0) availableWidth / totalCols.toFloat() else minColWidth
+            val columnWidth = if (calculatedColWidth > minColWidth) calculatedColWidth else minColWidth
+
+            Box(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(scrollState),
+                    horizontalArrangement = Arrangement.spacedBy(spacing)
+                ) {
                 monthlyItems.forEachIndexed { idx, row ->
                     val qIdx = idx / 3
                     val isPartSelected = currentQuarter == qIdx
@@ -2989,10 +2987,10 @@ fun MatrixTableView(
                             .clip(RoundedCornerShape(8.dp))
                             .background(bgCol)
                             .clickable { onMonthSelected(row.monthName) }
-                            .padding(horizontal = 8.dp),
+                            .padding(horizontal = 4.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        // Header (Quarter indicator clickable badge + Month Name)
+                        // Header (Quarter indicator clickable badge + Month Name with dynamic year tag)
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -3005,7 +3003,7 @@ fun MatrixTableView(
                                     .clip(RoundedCornerShape(4.dp))
                                     .background(if (isPartSelected) BrandGreen.copy(alpha = 0.25f) else SlateBg)
                                     .clickable { onQuarterSelected(qIdx) }
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
                             ) {
                                 Text(
                                     text = "Q${qIdx + 1}",
@@ -3016,8 +3014,8 @@ fun MatrixTableView(
                             }
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                text = row.monthName.uppercase(),
-                                fontSize = 8.5.sp,
+                                text = getMonthLabelWithYear(row.monthName, selectedFY),
+                                fontSize = 8.sp,
                                 fontWeight = if (isMonthSelected) FontWeight.Black else FontWeight.Bold,
                                 color = if (isMonthSelected) BrandGreen else SlateTextLight
                             )
@@ -3028,7 +3026,7 @@ fun MatrixTableView(
                         Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.Center) {
                             Text(
                                 text = String.format("%.1f", row.revenueCr),
-                                fontSize = 9.sp,
+                                fontSize = 8.5.sp,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = if (isMonthSelected) FontWeight.Bold else FontWeight.Medium,
                                 color = SlateTextLight
@@ -3039,7 +3037,7 @@ fun MatrixTableView(
                         Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.Center) {
                             Text(
                                 text = String.format("%.1f", row.capacityMw),
-                                fontSize = 9.sp,
+                                fontSize = 8.5.sp,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = if (isMonthSelected) FontWeight.Bold else FontWeight.Medium,
                                 color = SlateTextLight
@@ -3050,7 +3048,7 @@ fun MatrixTableView(
                         Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.Center) {
                             Text(
                                 text = String.format("%.0f", row.volumeQty / 1000.0),
-                                fontSize = 9.sp,
+                                fontSize = 8.5.sp,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = if (isMonthSelected) FontWeight.Bold else FontWeight.Medium,
                                 color = SlateTextLight
@@ -3080,7 +3078,7 @@ fun MatrixTableView(
                             .width(columnWidth)
                             .clip(RoundedCornerShape(8.dp))
                             .background(BrandGreen.copy(alpha = 0.08f))
-                            .padding(horizontal = 8.dp),
+                            .padding(horizontal = 4.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Column(
@@ -3093,7 +3091,7 @@ fun MatrixTableView(
                             Spacer(modifier = Modifier.height(10.dp))
                             Text(
                                 text = "TOTAL",
-                                fontSize = 9.sp,
+                                fontSize = 8.5.sp,
                                 fontWeight = FontWeight.Black,
                                 color = BrandGreen
                             )
@@ -3104,7 +3102,7 @@ fun MatrixTableView(
                         Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.Center) {
                             Text(
                                 text = String.format("%.1f", totalRow.revenueCr),
-                                fontSize = 9.sp,
+                                fontSize = 8.5.sp,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Black,
                                 color = BrandGreen
@@ -3115,7 +3113,7 @@ fun MatrixTableView(
                         Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.Center) {
                             Text(
                                 text = String.format("%.1f", totalRow.capacityMw),
-                                fontSize = 9.sp,
+                                fontSize = 8.5.sp,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Black,
                                 color = BrandGreen
@@ -3126,7 +3124,7 @@ fun MatrixTableView(
                         Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.Center) {
                             Text(
                                 text = String.format("%.0f", totalRow.volumeQty / 1000.0),
-                                fontSize = 9.sp,
+                                fontSize = 8.5.sp,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Black,
                                 color = BrandGreen
@@ -3142,6 +3140,80 @@ fun MatrixTableView(
                         PacingCellValue(value = null, modifier = Modifier.fillMaxWidth().height(28.dp))
                         PacingCellValue(value = null, modifier = Modifier.fillMaxWidth().height(28.dp))
                         PacingCellValue(value = null, modifier = Modifier.fillMaxWidth().height(28.dp))
+                    }
+                }
+            }
+
+                // Smooth Scroll Assist Overlays (Left/Right Chevrons with rich feedback)
+                val showLeftArrow = remember { derivedStateOf { scrollState.value > 0 } }
+                val showRightArrow = remember { derivedStateOf { scrollState.value < scrollState.maxValue } }
+
+                if (showLeftArrow.value) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .matchParentSize()
+                            .width(36.dp)
+                            .background(
+                                brush = Brush.horizontalGradient(
+                                    colors = listOf(SlateCard.copy(alpha = 0.95f), Color.Transparent)
+                                )
+                            ),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        IconButton(
+                            onClick = {
+                                scope.launch {
+                                    scrollState.animateScrollTo((scrollState.value - 240).coerceAtLeast(0))
+                                }
+                            },
+                            modifier = Modifier
+                                .padding(start = 2.dp)
+                                .size(24.dp)
+                                .background(SlateBg.copy(alpha = 0.9f), CircleShape)
+                                .border(0.5.dp, SlateBorder, CircleShape)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.KeyboardArrowLeft,
+                                contentDescription = "Scroll Left",
+                                tint = BrandGreen,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+
+                if (showRightArrow.value) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .matchParentSize()
+                            .background(
+                                brush = Brush.horizontalGradient(
+                                    colors = listOf(Color.Transparent, SlateCard.copy(alpha = 0.95f))
+                                )
+                            ),
+                        contentAlignment = Alignment.CenterEnd
+                    ) {
+                        IconButton(
+                            onClick = {
+                                scope.launch {
+                                    scrollState.animateScrollTo((scrollState.value + 240).coerceAtMost(scrollState.maxValue))
+                                }
+                            },
+                            modifier = Modifier
+                                .padding(end = 2.dp)
+                                .size(24.dp)
+                                .background(SlateBg.copy(alpha = 0.9f), CircleShape)
+                                .border(0.5.dp, SlateBorder, CircleShape)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.KeyboardArrowRight,
+                                contentDescription = "Scroll Right",
+                                tint = BrandGreen,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     }
                 }
             }
