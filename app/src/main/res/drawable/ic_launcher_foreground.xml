@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.6"
+        android:scaleY="0.6"
+        android:translateX="27.45"
+        android:translateY="18.75">
+        <!-- Main Geometric Dart Shape -->
+        <path
+            android:fillColor="#60B446"
+            android:pathData="M 4 17.5 L 88.5 17.5 L 47.5 95.5 L 42.5 47.5 Z" />
+        <!-- Edge Artifact -->
+        <path
+            android:fillColor="#60B446"
+            android:pathData="M 0 85.5 L 8 100 L 0 100 Z" />
+    </group>
+</vector>
+
