@@ -1868,13 +1868,13 @@ fun GrewPortalTabContent(
                     Spacer(modifier = Modifier.width(10.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = userEmail?.split("@")?.get(0)?.replaceFirstChar { it.uppercase() } ?: "User",
+                            text = userEmail?.split("@")?.get(0)?.replaceFirstChar { it.uppercase() } ?: "Grew Executive",
                             fontWeight = FontWeight.Bold,
                             fontSize = 13.sp,
                             color = SlateTextLight
                         )
                         Text(
-                            text = userEmail ?: "",
+                            text = userEmail ?: "Local Offline Session",
                             fontSize = 9.sp,
                             color = SlateTextMuted,
                             maxLines = 1,
@@ -2020,25 +2020,6 @@ fun GrewPortalTabContent(
                     lineHeight = 13.sp,
                     color = SlateTextMuted
                 )
-            }
-        }
-        
-        Spacer(modifier = Modifier.height(8.dp))
-        
-        Button(
-            onClick = onLogout,
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444).copy(alpha = 0.15f)),
-            border = BorderStroke(1.dp, Color(0xFFEF4444).copy(alpha = 0.3f)),
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth().height(44.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
-                Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null, tint = Color(0xFFEF4444), modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("SECURE LOGOUT", color = Color(0xFFEF4444), fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
         }
     }

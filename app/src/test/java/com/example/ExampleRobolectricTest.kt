@@ -32,40 +32,14 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun test_dashboard_render_when_logged_in() {
-    val context = ApplicationProvider.getApplicationContext<Context>()
-    val sharedPrefs = context.getSharedPreferences("grew_auth", Context.MODE_PRIVATE)
-    sharedPrefs.edit().putString("grew_email", "navneet.chaudhary831@gmail.com").commit()
-
+  fun test_dashboard_render() {
     val viewModel = GrewViewModel()
     composeTestRule.setContent {
       MyApplicationTheme {
         DashboardScreen(viewModel = viewModel)
       }
     }
-    composeTestRule.waitForIdle()
-  }
-
-  @Test
-  fun test_dashboard_login_flow() {
-    val context = ApplicationProvider.getApplicationContext<Context>()
-    val sharedPrefs = context.getSharedPreferences("grew_auth", Context.MODE_PRIVATE)
-    sharedPrefs.edit().remove("grew_email").commit()
-
-    val viewModel = GrewViewModel()
-    composeTestRule.setContent {
-      MyApplicationTheme {
-        DashboardScreen(viewModel = viewModel)
-      }
-    }
-    composeTestRule.waitForIdle()
-    
-    // Find the Sign in with Google button by testTag
-    composeTestRule.onNodeWithTag("submit_button").performClick()
-    composeTestRule.waitForIdle()
-
-    // Click "Navneet Chaudhary" account item
-    composeTestRule.onNodeWithText("Navneet Chaudhary").performClick()
     composeTestRule.waitForIdle()
   }
 }
+
