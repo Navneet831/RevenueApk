@@ -1,0 +1,6 @@
+{
+  "name": "Grew Analytics",
+  "description": "Executive Revenue Matrix & Velocity Dashboard for Grew Energy.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

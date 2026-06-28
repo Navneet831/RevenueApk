@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "stitch": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@_davideast/stitch-mcp",
+        "proxy"
+      ],
+      "env": {
+        "STITCH_API_KEY": "AQ.Ab8RN6J6MpqFfo2g6bQKN0RKwVWEDxxtVF0V7IG_1p3zFk45Vg"
+      }
+    },
+    "supabase": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@supabase/mcp-server-supabase@latest",
+        "--access-token",
+        "sbp_dd91635d50e1c29dfcc195cb8da1c19537799c4a"
+      ]
+    }
+  }
+}

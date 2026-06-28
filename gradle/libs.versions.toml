@@ -1,5 +1,5 @@
 [versions]
-agp = "9.1.1"
+agp = "9.2.1"
 coreKtx = "1.18.0"
 junit = "4.13.2"
 junitVersion = "1.3.0"
@@ -31,6 +31,7 @@ cameraView = "1.5.0"
 cameraCore = "1.5.0"
 loggingInterceptor = "4.10.0"
 okhttp = "4.10.0"
+playServicesAuth = "21.3.0"
 moshiKotlin = "1.15.2"
 moshiKotlinCodegen = "1.15.2"
 datastorePreferences = "1.1.7"
@@ -38,8 +39,22 @@ robolectric = "4.16.1"
 roborazzi = "1.59.0"
 firebaseBom = "34.12.0"
 secretsGradlePlugin = "2.0.1"
+supabase = "3.1.1"
+ktor = "3.0.3"
 
 [libraries]
+supabase_bom = { group = "io.github.jan-tennert.supabase", name = "bom", version.ref = "supabase" }
+supabase_postgrest = { group = "io.github.jan-tennert.supabase", name = "postgrest-kt" }
+supabase_auth = { group = "io.github.jan-tennert.supabase", name = "auth-kt" }
+supabase_realtime = { group = "io.github.jan-tennert.supabase", name = "realtime-kt" }
+supabase_storage = { group = "io.github.jan-tennert.supabase", name = "storage-kt" }
+ktor_client_android = { group = "io.ktor", name = "ktor-client-android", version.ref = "ktor" }
+ktor_client_core = { group = "io.ktor", name = "ktor-client-core", version.ref = "ktor" }
+ktor_client_cio = { group = "io.ktor", name = "ktor-client-cio", version.ref = "ktor" }
+ktor_client_logging = { group = "io.ktor", name = "ktor-client-logging", version.ref = "ktor" }
+ktor_client_content_negotiation = { group = "io.ktor", name = "ktor-client-content-negotiation", version.ref = "ktor" }
+ktor_serialization_kotlinx_json = { group = "io.ktor", name = "ktor-serialization-kotlinx-json", version.ref = "ktor" }
+
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
@@ -70,6 +85,7 @@ retrofit = { group = "com.squareup.retrofit2", name = "retrofit", version.ref = 
 converter-moshi = { group = "com.squareup.retrofit2", name = "converter-moshi", version.ref = "converterMoshi" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "kotlinxCoroutinesAndroid" }
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "kotlinxCoroutinesCore" }
+play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
 accompanist-permissions = { group = "com.google.accompanist", name = "accompanist-permissions", version.ref = "accompanistPermissions" }
 play-services-location = { group = "com.google.android.gms", name = "play-services-location", version.ref = "playServicesLocation" }
 androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "cameraCamera2" }

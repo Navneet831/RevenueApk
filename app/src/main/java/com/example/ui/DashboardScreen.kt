@@ -46,6 +46,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import com.example.data.GrewRecord
 import com.example.ui.theme.*
 import com.example.BuildConfig
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.android.gms.common.api.Scope
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -57,6 +62,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import java.net.URLEncoder
+import io.github.jan.supabase.auth.status.SessionStatus
 
 @Composable
 fun GrewEnergyLogo(modifier: Modifier = Modifier, showText: Boolean = true) {
@@ -95,7 +101,7 @@ fun GrewEnergyLogo(modifier: Modifier = Modifier, showText: Boolean = true) {
                 }
                 drawPath(
                     path = mainPath,
-                    color = Color(0xFF60B446)
+                    color = BrandGreen
                 )
                 
                 // Draw edge artifact polygon
@@ -107,7 +113,7 @@ fun GrewEnergyLogo(modifier: Modifier = Modifier, showText: Boolean = true) {
                 }
                 drawPath(
                     path = artifactPath,
-                    color = Color(0xFF60B446)
+                    color = BrandGreen
                 )
             }
         }
@@ -125,7 +131,7 @@ fun GrewEnergyLogo(modifier: Modifier = Modifier, showText: Boolean = true) {
                 text = words[currentIndex],
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color(0xFF60B446),
+                color = BrandGreen,
                 letterSpacing = 1.sp
             )
         }
@@ -171,624 +177,281 @@ fun GoogleIcon(modifier: Modifier = Modifier) {
     }
 }
 
-// Top-level network client callback to verify whitelisted status in Supabase
-suspend fun verifyEmailWithSupabase(email: String, url: String, key: String): Boolean = withContext(Dispatchers.IO) {
-    if (url.isEmpty() || url.contains("YOUR_SUPABASE_PROJECT_URL_HERE") || key.isEmpty() || key.contains("YOUR_SUPABASE_ANON_KEY_HERE")) {
-        return@withContext false
-    }
-    try {
-        val client = okhttp3.OkHttpClient()
-        val encodedEmail = java.net.URLEncoder.encode(email, "UTF-8")
-        val request = okhttp3.Request.Builder()
-            .url("${url.trimEnd('/')}/rest/v1/whitelist?email=eq.$encodedEmail")
-            .addHeader("apikey", key)
-            .addHeader("Authorization", "Bearer $key")
-            .build()
-        client.newCall(request).execute().use { response ->
-            if (response.isSuccessful) {
-                val json = response.body?.string() ?: ""
-                // A response of "[]" represents no match, otherwise it exists in the list
-                json.trim().startsWith("[") && json.trim() != "[]"
-            } else {
-                false
-            }
-        }
-    } catch (e: Exception) {
-        e.printStackTrace()
-        false
-    }
-}
-
-// Top-level network client callback to save generated OTP in a custom table if available
-suspend fun saveOtpInSupabase(email: String, otp: String, url: String, key: String): Boolean = withContext(Dispatchers.IO) {
-    if (url.isEmpty() || url.contains("YOUR_SUPABASE_PROJECT_URL_HERE") || key.isEmpty() || key.contains("YOUR_SUPABASE_ANON_KEY_HERE")) {
-        return@withContext false
-    }
-    try {
-        val client = okhttp3.OkHttpClient()
-        val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
-        val bodyJson = "{\"email\":\"$email\",\"otp_code\":\"$otp\",\"created_at\":\"now()\"}"
-        val body = bodyJson.toRequestBody(mediaType)
-        val request = okhttp3.Request.Builder()
-            .url("${url.trimEnd('/')}/rest/v1/otps")
-            .addHeader("apikey", key)
-            .addHeader("Authorization", "Bearer $key")
-            .addHeader("Content-Type", "application/json")
-            .addHeader("Prefer", "resolution=merge-duplicates")
-            .post(body)
-            .build()
-        client.newCall(request).execute().use { response ->
-            response.isSuccessful
-        }
-    } catch (e: Exception) {
-        e.printStackTrace()
-        false
-    }
-}
-
 @Composable
-fun WhitelistedLoginScreen(
-    onLoginSuccess: (String) -> Unit
+fun GrewLoginScreen(
+    viewModel: GrewViewModel,
+    onLoginSuccess: () -> Unit
 ) {
-    var selectedEmail by remember { mutableStateOf("") }
-    var emailInput by remember { mutableStateOf("") }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    
-    var isAuthenticating by remember { mutableStateOf(false) }
-    var authProgressStep by remember { mutableStateOf("") }
-    
-    var showAccountChooser by remember { mutableStateOf(false) }
-    
-    // OTP states
+    var email by remember { mutableStateOf("") }
+    var otpValue by remember { mutableStateOf("") }
     var isOtpSent by remember { mutableStateOf(false) }
-    var otpInput by remember { mutableStateOf("") }
-    var generatedOtp by remember { mutableStateOf("") }
-    
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var isLoading by remember { mutableStateOf(false) }
+    var progressStep by remember { mutableStateOf("") }
+
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val userSession by viewModel.userSession.collectAsState()
+    val syncState by viewModel.syncState.collectAsState()
+
+    // Google Sign-In Setup
+    val googleWebClientId = remember {
+        val resId = context.resources.getIdentifier("google_web_client_id", "string", context.packageName)
+        val id = if (resId != 0) context.getString(resId) else ""
+        android.util.Log.d("GrewAuth", "Google Web Client ID: '$id'")
+        id
+    }
+
+    val googleSignInOptions = remember(googleWebClientId) {
+        val builder = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+            .requestEmail()
+            .requestProfile()
+        
+        if (googleWebClientId.isNotEmpty()) {
+            builder.requestIdToken(googleWebClientId)
+        }
+        
+        builder.build()
+    }
+    val googleSignInClient = remember { GoogleSignIn.getClient(context, googleSignInOptions) }
     
-    val isSupabaseConfigured = remember {
-        val url = BuildConfig.SUPABASE_URL
-        val key = BuildConfig.SUPABASE_ANON_KEY
-        url.isNotEmpty() && !url.contains("YOUR_SUPABASE_PROJECT_URL_HERE") &&
-        key.isNotEmpty() && !key.contains("YOUR_SUPABASE_ANON_KEY_HERE")
+    val googleLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val task = GoogleSignIn.getSignedInAccountFromIntent(result.data)
+        try {
+            val account = task.getResult(com.google.android.gms.common.api.ApiException::class.java)
+            account?.idToken?.let { idToken ->
+                viewModel.signInWithGoogle(idToken)
+            } ?: run {
+                errorMessage = "Google authentication failed: Missing ID Token"
+            }
+        } catch (e: Exception) {
+            errorMessage = "Google login error: ${e.localizedMessage}"
+        }
+    }
+
+    LaunchedEffect(userSession) {
+        if (userSession is SessionStatus.Authenticated) {
+            onLoginSuccess()
+        }
+    }
+
+    LaunchedEffect(syncState) {
+        if (syncState is SheetSyncState.Error) {
+            errorMessage = (syncState as SheetSyncState.Error).message
+            isLoading = false
+        } else if (syncState is SheetSyncState.Idle && isLoading && !isOtpSent) {
+            // This happens after sendOtp succeeds
+            isOtpSent = true
+            isLoading = false
+            progressStep = ""
+        }
     }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(SlateBg)
-            .padding(24.dp),
+            .background(SlateBg),
         contentAlignment = Alignment.Center
     ) {
-        // Core central login card
+        // High-tech grid background pattern
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val gridSpacing = 40.dp.toPx()
+            val strokeWidth = 1.dp.toPx()
+            val color = BrandGreen.copy(alpha = 0.05f)
+            
+            for (x in 0..size.width.toInt() step gridSpacing.toInt()) {
+                drawLine(color, Offset(x.toFloat(), 0f), Offset(x.toFloat(), size.height), strokeWidth)
+            }
+            for (y in 0..size.height.toInt() step gridSpacing.toInt()) {
+                drawLine(color, Offset(0f, y.toFloat()), Offset(size.width, y.toFloat()), strokeWidth)
+            }
+        }
+
         Card(
             modifier = Modifier
-                .fillMaxWidth()
-                .widthIn(max = 400.dp)
-                .wrapContentHeight()
-                .animateContentSize(),
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = SlateCard),
-            border = BorderStroke(1.dp, SlateBorder)
+                .fillMaxWidth(0.85f)
+                .padding(16.dp)
+                .shadow(24.dp, RoundedCornerShape(16.dp), ambientColor = BrandGreen, spotColor = BrandGreen),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = SlateCard.copy(alpha = 0.9f)),
+            border = BorderStroke(1.dp, BrandGreen.copy(alpha = 0.3f))
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(28.dp),
+                    .padding(32.dp)
+                    .fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                GrewEnergyLogo(modifier = Modifier.padding(bottom = 24.dp))
+                GrewEnergyLogo(modifier = Modifier.padding(bottom = 32.dp))
                 
-                if (isAuthenticating) {
-                    // High-quality loading performance
-                    Column(
-                        modifier = Modifier.padding(vertical = 16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        CircularProgressIndicator(
-                            color = BrandGreen,
-                            strokeWidth = 3.dp,
-                            modifier = Modifier.size(36.dp)
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = authProgressStep,
-                            fontSize = 11.sp,
-                            color = SlateTextLight,
-                            fontWeight = FontWeight.SemiBold,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-                } else if (showAccountChooser) {
-                    // Interactive Google Choose Account bottom drawer panel simulated
-                    Column(
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                GoogleIcon()
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "Choose a Google Account",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = SlateTextLight
-                                )
-                            }
-                            Text(
-                                text = "to GrewAnalytics",
-                                fontSize = 9.sp,
-                                color = SlateTextMuted
-                            )
-                        }
-                        
-                        Spacer(modifier = Modifier.height(16.dp))
-                        
-                        // 1. Account item (Authorized Developer)
-                        GoogleAccountItem(
-                            name = "Navneet Chaudhary",
-                            email = "navneet.chaudhary831@gmail.com",
-                            initial = "NC",
-                            color = BrandGreen,
-                            tag = "Whitelisted Admin",
-                            onClick = {
-                                showAccountChooser = false
-                                selectedEmail = "navneet.chaudhary831@gmail.com"
-                                triggerGoogleLoginFlow(
-                                    scope = scope,
-                                    email = selectedEmail,
-                                    onLoginSuccess = onLoginSuccess,
-                                    setAuthenticating = { isAuthenticating = it },
-                                    setProgressStep = { authProgressStep = it },
-                                    setErrorMessage = { errorMessage = it }
-                                )
-                            }
-                        )
-                        
-                        // 2. Account item (Authorized Regional Auditor)
-                        GoogleAccountItem(
-                            name = "Grew Regional Auditor",
-                            email = "guest.visitor@grewenergy.com",
-                            initial = "GA",
-                            color = BrandGold,
-                            tag = "Authorized Guest",
-                            onClick = {
-                                showAccountChooser = false
-                                selectedEmail = "guest.visitor@grewenergy.com"
-                                triggerGoogleLoginFlow(
-                                    scope = scope,
-                                    email = selectedEmail,
-                                    onLoginSuccess = onLoginSuccess,
-                                    setAuthenticating = { isAuthenticating = it },
-                                    setProgressStep = { authProgressStep = it },
-                                    setErrorMessage = { errorMessage = it }
-                                )
-                            }
-                        )
+                Text(
+                    text = if (isOtpSent) "VERIFICATION REQUIRED" else "EXECUTIVE ACCESS",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = BrandGreen,
+                    letterSpacing = 2.sp
+                )
+                
+                Spacer(modifier = Modifier.height(24.dp))
 
-                        // 3. Account item (Unauthorized)
-                        GoogleAccountItem(
-                            name = "Guest Visitor",
-                            email = "unknown.hacker@gmail.com",
-                            initial = "GH",
-                            color = Color(0xFFEF4444),
-                            tag = "Unregistered",
-                            onClick = {
-                                showAccountChooser = false
-                                selectedEmail = "unknown.hacker@gmail.com"
-                                triggerGoogleLoginFlow(
-                                    scope = scope,
-                                    email = selectedEmail,
-                                    onLoginSuccess = onLoginSuccess,
-                                    setAuthenticating = { isAuthenticating = it },
-                                    setProgressStep = { authProgressStep = it },
-                                    setErrorMessage = { errorMessage = it }
-                                )
-                            }
-                        )
-
-                        // 4. Custom Login Option
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    showAccountChooser = false
-                                }
-                                .border(1.dp, SlateBorder, RoundedCornerShape(12.dp))
-                                .padding(vertical = 12.dp, horizontal = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Add,
-                                contentDescription = null,
-                                tint = SlateTextMuted,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text(
-                                text = "Use another Enterprise account...",
-                                fontSize = 11.sp,
-                                color = SlateTextLight,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                        
-                        Spacer(modifier = Modifier.height(16.dp))
-                        
-                        // Let User login without any authentication directly from account chooser too!
-                        OutlinedButton(
-                            onClick = {
-                                onLoginSuccess("demo.visitor@grewenergy.com")
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(44.dp),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = BrandGreen),
-                            border = BorderStroke(1.dp, BrandGreen.copy(alpha = 0.5f)),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.LockOpen,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
-                                    tint = BrandGreen
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Skip Authentication (Demo Mode)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
-                        
-                        Spacer(modifier = Modifier.height(12.dp))
-                        
-                        Button(
-                            onClick = { showAccountChooser = false },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
-                            border = BorderStroke(1.dp, SlateBorder),
-                            modifier = Modifier.align(Alignment.CenterHorizontally),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text("Cancel", color = SlateTextMuted, fontSize = 10.sp)
-                        }
-                    }
-                } else if (isOtpSent) {
-                    // TWO-FACTOR OTP VERIFICATION PANEL
-                    Column(
+                if (!isOtpSent) {
+                    OutlinedTextField(
+                        value = email,
+                        onValueChange = { email = it },
+                        label = { Text("Corporate Email") },
+                        placeholder = { Text("email@grewenergy.com") },
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Lock,
-                            contentDescription = null,
-                            tint = BrandGreen,
-                            modifier = Modifier.size(36.dp)
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = BrandGreen,
+                            unfocusedBorderColor = SlateBorder,
+                            focusedLabelColor = BrandGreen,
+                            focusedTextColor = SlateTextLight,
+                            unfocusedTextColor = SlateTextLight
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "Security Verification",
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = SlateTextLight,
-                            textAlign = TextAlign.Center
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "We have generated a secure One-Time PIN for you and registered it in Supabase.",
-                            fontSize = 10.sp,
-                            color = SlateTextMuted,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(horizontal = 8.dp)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Sent to: $selectedEmail",
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = BrandGreen,
-                            textAlign = TextAlign.Center
-                        )
-                        
-                        Spacer(modifier = Modifier.height(20.dp))
-                        
-                        OutlinedTextField(
-                            value = otpInput,
-                            onValueChange = {
-                                val clean = it.trim()
-                                if (clean.length <= 6 && clean.all { c -> c.isDigit() }) {
-                                    otpInput = clean
-                                    errorMessage = null
-                                }
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("otp_input"),
-                            textStyle = androidx.compose.ui.text.TextStyle(
-                                fontFamily = FontFamily.Monospace,
-                                letterSpacing = 6.sp,
-                                fontSize = 18.sp,
-                                textAlign = TextAlign.Center,
-                                color = SlateTextLight,
-                                fontWeight = FontWeight.Bold
-                            ),
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            placeholder = { Text("000000", modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = SlateTextMuted.copy(alpha = 0.4f)) },
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = SlateTextLight,
-                                unfocusedTextColor = SlateTextLight,
-                                focusedBorderColor = BrandGreen,
-                                unfocusedBorderColor = SlateBorder,
-                                focusedLabelColor = BrandGreen
-                            )
-                        )
-                        
-                        Spacer(modifier = Modifier.height(20.dp))
-                        
-                        Button(
-                            onClick = {
-                                if (otpInput.trim() == generatedOtp) {
-                                    onLoginSuccess(selectedEmail)
-                                } else {
-                                    errorMessage = "Incorrect security verification PIN. Please verify the code or request a new one."
-                                }
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(44.dp)
-                                .testTag("verify_otp_button"),
-                            colors = ButtonDefaults.buttonColors(containerColor = BrandGreen),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("Verify Security Code", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
-                        
-                        Spacer(modifier = Modifier.height(12.dp))
-                        
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            TextButton(
-                                onClick = {
-                                    otpInput = ""
-                                    triggerVerificationFlow(
-                                        scope = scope,
-                                        email = selectedEmail,
-                                        onOtpGenerated = { code -> generatedOtp = code },
-                                        onVerificationTransition = { isOtpSent = true },
-                                        setAuthenticating = { isAuthenticating = it },
-                                        setProgressStep = { authProgressStep = it },
-                                        setErrorMessage = { errorMessage = it }
-                                    )
-                                },
-                                colors = ButtonDefaults.textButtonColors(contentColor = BrandGreen)
-                            ) {
-                                Text("Resend Code", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-                            
-                            TextButton(
-                                onClick = {
-                                    isOtpSent = false
-                                    otpInput = ""
-                                    errorMessage = null
-                                },
-                                colors = ButtonDefaults.textButtonColors(contentColor = SlateTextMuted)
-                            ) {
-                                Text("Back to Sign In", fontSize = 11.sp)
-                            }
-                        }
-                        
-                        // Elegant, modern Developer Assistant helper PIN banner
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = CardDefaults.cardColors(containerColor = BrandGreen.copy(alpha = 0.08f)),
-                            border = BorderStroke(1.dp, BrandGreen.copy(alpha = 0.2f)),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Column(modifier = Modifier.padding(12.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = Icons.Default.Info,
-                                        contentDescription = null,
-                                        tint = BrandGreen,
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "SUPABASE SECURITY OVERLAY",
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = BrandGreen,
-                                        letterSpacing = 0.5.sp
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "PIN code generated successfully: $generatedOtp. Enter this PIN above to verify instantly.",
-                                    fontSize = 9.sp,
-                                    color = SlateTextLight.copy(alpha = 0.8f),
-                                    lineHeight = 13.sp
-                                )
-                            }
-                        }
-                    }
+                    )
                 } else {
-                    // Unified Google and Email Login controls
-                    Column(
+                    Text(
+                        text = "We sent a 6-digit code to $email",
+                        fontSize = 10.sp,
+                        color = SlateTextMuted,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                    OutlinedTextField(
+                        value = otpValue,
+                        onValueChange = { if (it.length <= 6) otpValue = it },
+                        label = { Text("Verification Code") },
+                        placeholder = { Text("000000") },
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        // 1. Google sign in button with logo
-                        Button(
-                            onClick = { showAccountChooser = true },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                                .testTag("submit_button"),
-                            colors = ButtonDefaults.buttonColors(containerColor = SoftChipBg),
-                            border = BorderStroke(1.dp, SlateBorder),
-                            shape = RoundedCornerShape(14.dp),
-                            elevation = ButtonDefaults.buttonElevation(defaultElevation = 2.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.Center
-                            ) {
-                                GoogleIcon()
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Text(
-                                    text = "Sign in with Google",
-                                    color = SlateTextLight,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-                        
-                        Spacer(modifier = Modifier.height(20.dp))
-                        
-                        // Centered styled OR divider
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            HorizontalDivider(modifier = Modifier.weight(1f), color = SlateBorder, thickness = 1.dp)
-                            Text(
-                                text = "OR USE ENTERPRISE EMAIL",
-                                fontSize = 8.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = SlateTextMuted,
-                                modifier = Modifier.padding(horizontal = 12.dp),
-                                letterSpacing = 1.sp
-                            )
-                            HorizontalDivider(modifier = Modifier.weight(1f), color = SlateBorder, thickness = 1.dp)
-                        }
-                        
-                        Spacer(modifier = Modifier.height(16.dp))
-                        
-                        // 2. Email sign in field
-                        OutlinedTextField(
-                            value = emailInput,
-                            onValueChange = {
-                                emailInput = it
-                                errorMessage = null
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("email_input"),
-                            label = { Text("Registered Email Address", fontSize = 11.sp, color = SlateTextMuted) },
-                            placeholder = { Text("your.name@grewenergy.com", color = SlateTextMuted.copy(alpha = 0.5f)) },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Default.AlternateEmail,
-                                    contentDescription = null,
-                                    tint = BrandGreen,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            },
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = SlateTextLight,
-                                unfocusedTextColor = SlateTextLight,
-                                focusedBorderColor = BrandGreen,
-                                unfocusedBorderColor = SlateBorder,
-                                focusedLabelColor = BrandGreen
-                            )
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = BrandGreen,
+                            unfocusedBorderColor = SlateBorder,
+                            focusedLabelColor = BrandGreen,
+                            focusedTextColor = SlateTextLight,
+                            unfocusedTextColor = SlateTextLight
                         )
-                        
-                        Spacer(modifier = Modifier.height(12.dp))
-                        
-                        Button(
-                            onClick = {
-                                val clean = emailInput.trim().lowercase()
-                                if (clean.isEmpty()) {
-                                    errorMessage = "Please enter your registered enterprise email address."
-                                } else {
-                                    selectedEmail = clean
-                                    triggerVerificationFlow(
-                                        scope = scope,
-                                        email = selectedEmail,
-                                        onOtpGenerated = { code -> generatedOtp = code },
-                                        onVerificationTransition = { isOtpSent = true },
-                                        setAuthenticating = { isAuthenticating = it },
-                                        setProgressStep = { authProgressStep = it },
-                                        setErrorMessage = { errorMessage = it }
-                                    )
-                                }
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(44.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = BrandGreen),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("Sign In with Email", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
-                        
-                        Spacer(modifier = Modifier.height(14.dp))
-                        
-                        // LET THE USER LOGIN WITHOUT AUTHENTICATION (Skip/Demo Mode option)
-                        OutlinedButton(
-                            onClick = {
-                                onLoginSuccess("demo.visitor@grewenergy.com")
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(44.dp)
-                                .testTag("skip_auth_button"),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = BrandGreen),
-                            border = BorderStroke(1.dp, BrandGreen.copy(alpha = 0.5f)),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.LockOpen,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
-                                    tint = BrandGreen
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Skip Authentication (Demo Mode)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
+                    )
+                    TextButton(
+                        onClick = { isOtpSent = false; otpValue = "" },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("Change Email", fontSize = 10.sp, color = BrandGreen)
                     }
                 }
 
-                errorMessage?.let { msg ->
-                    Spacer(modifier = Modifier.height(20.dp))
+                if (errorMessage != null) {
+                    Text(
+                        text = errorMessage!!,
+                        color = Color(0xFFEF4444),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(top = 12.dp)
+                    )
+                }
+
+                if (isLoading) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    CircularProgressIndicator(color = BrandGreen, modifier = Modifier.size(24.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(progressStep, fontSize = 9.sp, color = SlateTextMuted)
+                }
+
+                Spacer(modifier = Modifier.height(32.dp))
+
+                Button(
+                    onClick = {
+                        if (!isOtpSent) {
+                            if (email.contains("@")) {
+                                isLoading = true
+                                errorMessage = null
+                                progressStep = "Checking whitelist status..."
+                                scope.launch {
+                                    val whitelisted = verifyEmailWithSupabase(
+                                        email.trim(),
+                                        BuildConfig.SUPABASE_URL,
+                                        BuildConfig.SUPABASE_ANON_KEY
+                                    )
+                                    if (whitelisted) {
+                                        progressStep = "Sending secure OTP..."
+                                        viewModel.sendOtp(email.trim())
+                                    } else {
+                                        isLoading = false
+                                        errorMessage = "Access Denied: Email not whitelisted."
+                                    }
+                                }
+                            } else {
+                                errorMessage = "Please enter a valid corporate email"
+                            }
+                        } else {
+                            if (otpValue.length >= 6) {
+                                viewModel.verifyOtp(email.trim(), otpValue.trim())
+                                isLoading = true
+                                progressStep = "Validating security token..."
+                            } else {
+                                errorMessage = "Enter the verification code"
+                            }
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth(0.85f) // Reduced width for better balance
+                        .height(44.dp), // Slightly smaller height
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = BrandGreen),
+                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 1.dp),
+                    enabled = !isLoading
+                ) {
+                    Text(
+                        text = if (isOtpSent) "VERIFY" else "GET CODE", // Shorter, cleaner text
+                        fontWeight = FontWeight.Bold,
+                        color = Color.Black,
+                        fontSize = 12.sp // Slightly smaller text
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+                
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth(0.9f)
+                ) {
+                    HorizontalDivider(modifier = Modifier.weight(1f), color = SlateBorder.copy(alpha = 0.5f))
+                    Text(" or ", color = SlateTextMuted, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 12.dp))
+                    HorizontalDivider(modifier = Modifier.weight(1f), color = SlateBorder.copy(alpha = 0.5f))
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                OutlinedButton(
+                    onClick = {
+                        if (googleWebClientId.isEmpty()) {
+                            errorMessage = "Google Sign-in configuration missing (Client ID not found in strings.xml)."
+                        } else {
+                            errorMessage = null
+                            googleLauncher.launch(googleSignInClient.signInIntent)
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth(0.85f)
+                        .height(44.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, SlateBorder),
+                    enabled = !isLoading,
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = SlateTextLight)
+                ) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Color(0xFFFEF2F2).copy(alpha = 0.08f), RoundedCornerShape(12.dp))
-                            .border(1.dp, Color(0xFFEF4444).copy(alpha = 0.3f), RoundedCornerShape(12.dp))
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Warning,
-                            contentDescription = "Access Denied",
-                            tint = Color(0xFFEF4444),
-                            modifier = Modifier.size(16.dp)
-                        )
+                        GoogleIcon(modifier = Modifier.size(16.dp)) // Explicitly sized Google Icon
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = msg,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFFCA5A5),
-                            modifier = Modifier.weight(1f)
+                            "Continue with Google", 
+                            fontWeight = FontWeight.Medium, 
+                            fontSize = 12.sp
                         )
                     }
                 }
@@ -797,209 +460,8 @@ fun WhitelistedLoginScreen(
     }
 }
 
-// Extension to safely evaluate ints as DP inside our screens
-private fun Int.getDp() = this.dp
-
 @Composable
-fun GoogleAccountItem(
-    name: String,
-    email: String,
-    initial: String,
-    color: Color,
-    tag: String,
-    onClick: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 8.dp)
-            .clickable(onClick = onClick)
-            .border(1.dp, SlateBorder, RoundedCornerShape(12.dp))
-            .padding(10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            modifier = Modifier
-                .size(32.dp)
-                .background(color.copy(alpha = 0.15f), CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = initial,
-                color = color,
-                fontWeight = FontWeight.Bold,
-                fontSize = 12.sp
-            )
-        }
-        
-        Spacer(modifier = Modifier.width(12.dp))
-        
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = name,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                color = SlateTextLight
-            )
-            Text(
-                text = email,
-                fontSize = 9.sp,
-                color = SlateTextMuted
-            )
-        }
-        
-        Spacer(modifier = Modifier.width(4.dp))
-        
-        Box(
-            modifier = Modifier
-                .background(color.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
-                .border(1.dp, color.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
-                .padding(horizontal = 4.dp, vertical = 2.dp)
-        ) {
-            Text(
-                text = tag,
-                fontSize = 7.sp,
-                color = color,
-                fontWeight = FontWeight.Bold
-            )
-        }
-    }
-}
-
-// Triggers the coroutine verification flow for the selected account email, generating and validating OTP codes
-fun triggerVerificationFlow(
-    scope: kotlinx.coroutines.CoroutineScope,
-    email: String,
-    onOtpGenerated: (String) -> Unit,
-    onVerificationTransition: () -> Unit,
-    setAuthenticating: (Boolean) -> Unit,
-    setProgressStep: (String) -> Unit,
-    setErrorMessage: (String?) -> Unit
-) {
-    scope.launch {
-        try {
-            setAuthenticating(true)
-            setErrorMessage(null)
-            
-            setProgressStep("Initiating secure network handshake...")
-            kotlinx.coroutines.delay(800)
-            
-            setProgressStep("Querying security registry...")
-            kotlinx.coroutines.delay(600)
-            
-            val url = BuildConfig.SUPABASE_URL
-            val key = BuildConfig.SUPABASE_ANON_KEY
-            val isSupabaseConfigured = url.isNotEmpty() && !url.contains("YOUR_SUPABASE_PROJECT_URL_HERE") &&
-                                       key.isNotEmpty() && !key.contains("YOUR_SUPABASE_ANON_KEY_HERE")
-            
-            var isWhitelisted = false
-            if (isSupabaseConfigured) {
-                setProgressStep("Connecting to Supabase Security Gateway...")
-                kotlinx.coroutines.delay(600)
-                setProgressStep("Verifying whitelist permissions in Supabase...")
-                kotlinx.coroutines.delay(600)
-                isWhitelisted = verifyEmailWithSupabase(email, url, key)
-            } else {
-                setProgressStep("Offline Local Registry Check...")
-                kotlinx.coroutines.delay(600)
-                val cleanEmail = email.trim().lowercase()
-                isWhitelisted = cleanEmail == "navneet.chaudhary831@gmail.com" ||
-                                 cleanEmail.endsWith("@grewenergy.com") ||
-                                 cleanEmail.endsWith("@google.com") ||
-                                 cleanEmail.endsWith("@example.com")
-            }
-            
-            if (isWhitelisted) {
-                setProgressStep("Generating secure OTP verification pin...")
-                kotlinx.coroutines.delay(600)
-                val otpCode = String.format("%06d", (100000..999999).random())
-                
-                if (isSupabaseConfigured) {
-                    setProgressStep("Saving cryptographic OTP to Supabase rest...")
-                    val saved = saveOtpInSupabase(email, otpCode, url, key)
-                    if (saved) {
-                        setProgressStep("OTP Registered in Supabase successfully!")
-                    } else {
-                        setProgressStep("Supabase Table Schema Fallback: Cryptographic session active")
-                    }
-                    kotlinx.coroutines.delay(400)
-                } else {
-                    setProgressStep("Cryptographic local safe-pin successfully registered.")
-                    kotlinx.coroutines.delay(400)
-                }
-                
-                onOtpGenerated(otpCode)
-                onVerificationTransition()
-            } else {
-                setErrorMessage("Access Denied: Enterprise email '$email' was not found in the 'whitelist' registry. Contact Navneet Chaudhary.")
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            setErrorMessage("Handshake failed: ${e.localizedMessage ?: "Unknown server or gateway connection exception."}")
-        } finally {
-            setAuthenticating(false)
-        }
-    }
-}
-
-// Triggers direct secure authentication for Google accounts, skipping password / OTP entries
-fun triggerGoogleLoginFlow(
-    scope: kotlinx.coroutines.CoroutineScope,
-    email: String,
-    onLoginSuccess: (String) -> Unit,
-    setAuthenticating: (Boolean) -> Unit,
-    setProgressStep: (String) -> Unit,
-    setErrorMessage: (String?) -> Unit
-) {
-    scope.launch {
-        try {
-            setAuthenticating(true)
-            setErrorMessage(null)
-            
-            setProgressStep("Initiating secure Google Handshake...")
-            kotlinx.coroutines.delay(600)
-            
-            setProgressStep("Fetching user profile with openid...")
-            kotlinx.coroutines.delay(400)
-            
-            val url = BuildConfig.SUPABASE_URL
-            val key = BuildConfig.SUPABASE_ANON_KEY
-            val isSupabaseConfigured = url.isNotEmpty() && !url.contains("YOUR_SUPABASE_PROJECT_URL_HERE") &&
-                                       key.isNotEmpty() && !key.contains("YOUR_SUPABASE_ANON_KEY_HERE")
-            
-            var isWhitelisted = false
-            if (isSupabaseConfigured) {
-                setProgressStep("Verifying Google account whitelist on Supabase...")
-                kotlinx.coroutines.delay(500)
-                isWhitelisted = verifyEmailWithSupabase(email, url, key)
-            } else {
-                setProgressStep("Offline Local Registry Check...")
-                kotlinx.coroutines.delay(500)
-                val cleanEmail = email.trim().lowercase()
-                isWhitelisted = cleanEmail == "navneet.chaudhary831@gmail.com" ||
-                                 cleanEmail.endsWith("@grewenergy.com") ||
-                                 cleanEmail.endsWith("@google.com") ||
-                                 cleanEmail.endsWith("@example.com")
-            }
-            
-            if (isWhitelisted) {
-                setProgressStep("Access Granted! Logging in via Google identity...")
-                kotlinx.coroutines.delay(300)
-                onLoginSuccess(email)
-            } else {
-                setErrorMessage("Access Denied: Enterprise email '$email' was not found in the 'whitelist' registry. Contact Navneet Chaudhary.")
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            setErrorMessage("Google authentication failed: ${e.localizedMessage ?: "Unknown connection error check your network status."}")
-        } finally {
-            setAuthenticating(false)
-        }
-    }
-}
-
-@Composable
-fun DatabaseDiagnosticsDialog(onDismiss: () -> Unit) {
+fun DatabaseDiagnosticsDialog(viewModel: GrewViewModel, onDismiss: () -> Unit) {
     var isCheckingConnection by remember { mutableStateOf(false) }
     var connectionResult by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -1008,6 +470,7 @@ fun DatabaseDiagnosticsDialog(onDismiss: () -> Unit) {
     val key = BuildConfig.SUPABASE_ANON_KEY
     val isConfigured = url.isNotEmpty() && !url.contains("YOUR_SUPABASE_PROJECT_URL_HERE") &&
                        key.isNotEmpty() && !key.contains("YOUR_SUPABASE_ANON_KEY_HERE")
+    val syncState by viewModel.syncState.collectAsState()
 
     Dialog(onDismissRequest = onDismiss) {
         Card(
@@ -1019,7 +482,9 @@ fun DatabaseDiagnosticsDialog(onDismiss: () -> Unit) {
                 .padding(16.dp)
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier
+                    .padding(20.dp)
+                    .verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Row(
@@ -1054,6 +519,42 @@ fun DatabaseDiagnosticsDialog(onDismiss: () -> Unit) {
                     DiagnosticRow(label = "Supabase Host", value = if (isConfigured) url.split("//").getOrNull(1)?.split("/")?.getOrNull(0) ?: "Connected" else "None (Placeholder)")
                     DiagnosticRow(label = "Target Table", value = "whitelist")
                     DiagnosticRow(label = "Access Method", value = "Secure TLS REST API")
+                }
+                
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Text(
+                    text = "Google Sheet Sync Diagnostics",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = BrandGreen,
+                    modifier = Modifier.align(Alignment.Start).padding(bottom = 6.dp)
+                )
+                
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(SlateBg, RoundedCornerShape(8.dp))
+                        .padding(12.dp)
+                ) {
+                    val statusText = when (val s = syncState) {
+                        is SheetSyncState.Idle -> "Idle / Uninitialized"
+                        is SheetSyncState.Syncing -> "Syncing live records..."
+                        is SheetSyncState.Success -> "Success (${s.count} rows)"
+                        is SheetSyncState.Error -> "Error: ${s.message}"
+                        else -> "Status Unknown"
+                    }
+                    val sheetIdText = when (val s = syncState) {
+                        is SheetSyncState.Success -> s.sheetId.take(12) + "..." + s.sheetId.takeLast(12)
+                        else -> "1rL...F4 [Fallback]"
+                    }
+                    val sourceText = when (val s = syncState) {
+                        is SheetSyncState.Success -> s.source
+                        else -> "Local Config (Offline Fallback)"
+                    }
+                    DiagnosticRow(label = "Sync Progress", value = statusText, isSuccess = syncState is SheetSyncState.Success)
+                    DiagnosticRow(label = "Source Provider", value = sourceText)
+                    DiagnosticRow(label = "Sheet ID Reference", value = sheetIdText)
                 }
                 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -1191,11 +692,8 @@ fun DashboardScreen(viewModel: GrewViewModel) {
     val stats by viewModel.stats.collectAsState()
     
     val context = LocalContext.current
+    val sharedPrefs = remember { context.getSharedPreferences("grew_prefs", Context.MODE_PRIVATE) }
     val sdf = SimpleDateFormat("dd MMM yyyy", Locale.ENGLISH)
-
-    // SharedPreferences persistence for authorized user
-    val sharedPrefs = remember { context.getSharedPreferences("grew_auth", Context.MODE_PRIVATE) }
-    var userEmail by rememberSaveable { mutableStateOf(sharedPrefs.getString("grew_email", null)) }
 
     // Bottom Navigation tab states (0: Overview & Trends, 1: Revenue Matrix, 2: Breakdowns)
     var activeBottomTab by remember { mutableStateOf(0) }
@@ -1203,53 +701,51 @@ fun DashboardScreen(viewModel: GrewViewModel) {
     var showIntelligenceBoard by remember { mutableStateOf(false) }
     var fyDropdownExpanded by remember { mutableStateOf(false) }
     var metricDropdownExpanded by remember { mutableStateOf(false) }
+    var segmentDropdownExpanded by remember { mutableStateOf(false) }
     var showDatePickerDialog by remember { mutableStateOf(false) }
 
     // Chart scrubbing states
     var scrubbedPointIndex by remember { mutableStateOf<Int?>(null) }
     var scrubbedOffset by remember { mutableStateOf(Offset.Zero) }
 
-    if (userEmail == null) {
-        WhitelistedLoginScreen(
-            onLoginSuccess = { email ->
-                sharedPrefs.edit().putString("grew_email", email).apply()
-                userEmail = email
-            }
+    val currentStats = stats
+    var showDbDiagnostics by remember { mutableStateOf(false) }
+    var showSyncDiagnostics by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val userEmail by viewModel.currentUserEmail.collectAsState()
+
+    if (showDbDiagnostics) {
+        DatabaseDiagnosticsDialog(viewModel = viewModel, onDismiss = { showDbDiagnostics = false })
+    }
+
+    if (showSyncDiagnostics) {
+        SyncDiagnosticsDialog(viewModel = viewModel, onDismiss = { showSyncDiagnostics = false })
+    }
+
+    if (showDatePickerDialog) {
+        val initialDate = filters.customEndDate ?: currentStats?.anchorDate ?: java.util.Date()
+        GrewDatePickerDialog(
+            initialDate = initialDate,
+            onDateSelected = { selectedDate ->
+                val newCal = Calendar.getInstance().apply { 
+                    time = selectedDate
+                    set(Calendar.HOUR_OF_DAY, 23)
+                    set(Calendar.MINUTE, 59)
+                    set(Calendar.SECOND, 59)
+                }
+                val startCal = Calendar.getInstance().apply {
+                    val m = newCal.get(Calendar.MONTH)
+                    val y = newCal.get(Calendar.YEAR)
+                    val fiscalStartYear = if (m >= Calendar.APRIL) y else y - 1
+                    set(fiscalStartYear, Calendar.APRIL, 1, 0, 0, 0)
+                }
+                viewModel.selectCustomDateRange(startCal.time, newCal.time)
+            },
+            onDismiss = { showDatePickerDialog = false }
         )
-    } else {
-        val currentStats = stats
-        var showDbDiagnostics by remember { mutableStateOf(false) }
-        val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-        val scope = rememberCoroutineScope()
+    }
 
-        if (showDbDiagnostics) {
-            DatabaseDiagnosticsDialog(onDismiss = { showDbDiagnostics = false })
-        }
-
-        if (showDatePickerDialog) {
-            val initialDate = filters.customEndDate ?: currentStats?.anchorDate ?: java.util.Date()
-            GrewDatePickerDialog(
-                initialDate = initialDate,
-                onDateSelected = { selectedDate ->
-                    val newCal = Calendar.getInstance().apply { 
-                        time = selectedDate
-                        set(Calendar.HOUR_OF_DAY, 23)
-                        set(Calendar.MINUTE, 59)
-                        set(Calendar.SECOND, 59)
-                    }
-                    val startCal = Calendar.getInstance().apply {
-                        val m = newCal.get(Calendar.MONTH)
-                        val y = newCal.get(Calendar.YEAR)
-                        val fiscalStartYear = if (m >= Calendar.APRIL) y else y - 1
-                        set(fiscalStartYear, Calendar.APRIL, 1, 0, 0, 0)
-                    }
-                    viewModel.selectCustomDateRange(startCal.time, newCal.time)
-                },
-                onDismiss = { showDatePickerDialog = false }
-            )
-        }
-
-        Scaffold(
+    Scaffold(
                 modifier = Modifier
                     .fillMaxSize()
                     .testTag("dashboard_root"),
@@ -1260,19 +756,27 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                             titleContentColor = SlateTextLight,
                             navigationIconContentColor = BrandGreen
                         ),
+                        navigationIcon = {
+                            GrewEnergyLogo(showText = false, modifier = Modifier.padding(start = 12.dp))
+                        },
                         title = {
-                            Box {
-                                Row(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(BrandGreen.copy(alpha = 0.12f))
-                                        .border(1.dp, BrandGreen, RoundedCornerShape(8.dp))
-                                        .clickable { fyDropdownExpanded = true }
-                                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
+
+                            val startLabel = filters.customStartDate?.let { sdf.format(it) } ?: sdf.format(viewModel.globalMinDate)
+                            val endLabel = filters.customEndDate?.let { sdf.format(it) } ?: sdf.format(viewModel.globalMaxDate)
+                            
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(BrandGreen.copy(alpha = 0.12f))
+                                    .border(1.dp, BrandGreen, RoundedCornerShape(8.dp))
+                                    .clickable { showDatePickerDialog = true }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.CalendarToday, contentDescription = null, tint = BrandGreen, modifier = Modifier.size(12.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        text = filters.selectedFY,
+                                        text = if (startLabel == endLabel) startLabel else "$startLabel — $endLabel",
                                         color = BrandGreen,
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
@@ -1281,120 +785,14 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Icon(
                                         imageVector = Icons.Default.ArrowDropDown,
-                                        contentDescription = "Select FY",
+                                        contentDescription = "Select Date Range",
                                         tint = BrandGreen,
                                         modifier = Modifier.size(14.dp)
                                     )
                                 }
-                                DropdownMenu(
-                                    expanded = fyDropdownExpanded,
-                                    onDismissRequest = { fyDropdownExpanded = false },
-                                    modifier = Modifier
-                                        .background(SlateCard)
-                                        .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
-                                ) {
-                                    viewModel.allFinancialYears.forEach { fy ->
-                                        val selected = filters.selectedFY == fy
-                                        DropdownMenuItem(
-                                            text = {
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    modifier = Modifier.fillMaxWidth()
-                                                ) {
-                                                    Text(
-                                                        text = fy,
-                                                        color = if (selected) BrandGreen else SlateTextLight,
-                                                        fontSize = 11.sp,
-                                                        fontFamily = FontFamily.Monospace,
-                                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
-                                                    )
-                                                    if (selected) {
-                                                        Spacer(modifier = Modifier.width(8.dp))
-                                                        Icon(
-                                                            imageVector = Icons.Default.Check,
-                                                            contentDescription = "selected",
-                                                            tint = BrandGreen,
-                                                            modifier = Modifier.size(12.dp)
-                                                        )
-                                                    }
-                                                }
-                                            },
-                                            onClick = {
-                                                viewModel.updateFY(fy)
-                                                fyDropdownExpanded = false
-                                            }
-                                        )
-                                    }
-                                }
                             }
                         },
                      actions = {
-                        // Metric switcher (Amount, MW, Qty) as drill down
-                        Box {
-                            Row(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(BrandGreen.copy(alpha = 0.12f))
-                                    .border(1.dp, BrandGreen, RoundedCornerShape(8.dp))
-                                    .clickable { metricDropdownExpanded = true }
-                                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = filters.activeMetric.name,
-                                    color = BrandGreen,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Icon(
-                                    imageVector = Icons.Default.ArrowDropDown,
-                                    contentDescription = "Select Metric",
-                                    tint = BrandGreen,
-                                    modifier = Modifier.size(14.dp)
-                                )
-                            }
-                            DropdownMenu(
-                                expanded = metricDropdownExpanded,
-                                onDismissRequest = { metricDropdownExpanded = false },
-                                modifier = Modifier
-                                    .background(SlateCard)
-                                    .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
-                            ) {
-                                DashboardMetric.values().forEach { m ->
-                                    val selected = filters.activeMetric == m
-                                    DropdownMenuItem(
-                                        text = {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                modifier = Modifier.fillMaxWidth()
-                                            ) {
-                                                Text(
-                                                    text = m.name,
-                                                    color = if (selected) BrandGreen else SlateTextLight,
-                                                    fontSize = 11.sp,
-                                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
-                                                )
-                                                if (selected) {
-                                                    Spacer(modifier = Modifier.width(8.dp))
-                                                    Icon(
-                                                        imageVector = Icons.Default.Check,
-                                                        contentDescription = "selected",
-                                                        tint = BrandGreen,
-                                                        modifier = Modifier.size(12.dp)
-                                                    )
-                                                }
-                                            }
-                                        },
-                                        onClick = {
-                                            viewModel.updateMetric(m)
-                                            metricDropdownExpanded = false
-                                        }
-                                    )
-                                }
-                            }
-                        }
-
                         IconButton(onClick = { showIntelligenceBoard = true }) {
                             Icon(
                                 imageVector = Icons.Default.Lightbulb,
@@ -1404,15 +802,25 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                             )
                         }
 
-                        IconButton(onClick = {
-                            showDatePickerDialog = true
-                        }) {
-                            Icon(
-                                imageVector = Icons.Default.CalendarToday,
-                                contentDescription = "Select Anchor Date",
-                                tint = BrandGreen,
-                                modifier = Modifier.size(18.dp)
-                            )
+                        val syncState by viewModel.syncState.collectAsState()
+                        IconButton(onClick = { viewModel.loadSheetData() }) {
+                            when (syncState) {
+                                is SheetSyncState.Syncing -> {
+                                    CircularProgressIndicator(
+                                        color = BrandGreen,
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                }
+                                else -> {
+                                    Icon(
+                                        imageVector = Icons.Default.Refresh,
+                                        contentDescription = "Sync Live Sheet",
+                                        tint = if (syncState is SheetSyncState.Error) Color(0xFFEF4444) else BrandGreen,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 )
@@ -1495,6 +903,78 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                     }
                 } else {
                     Column(modifier = Modifier.fillMaxSize()) {
+                        val currentSyncState by viewModel.syncState.collectAsState()
+                        when (val s = currentSyncState) {
+                            is SheetSyncState.Syncing -> {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(BrandGreen.copy(alpha = 0.1f))
+                                        .padding(vertical = 4.dp, horizontal = 12.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        CircularProgressIndicator(color = BrandGreen, modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp)
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Syncing live Grew Google Sheet records...", color = BrandGreen, fontSize = 9.sp, fontWeight = FontWeight.Medium)
+                                    }
+                                }
+                            }
+                            is SheetSyncState.Success -> {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(Color(0xFF0F2618))
+                                        .padding(vertical = 4.dp, horizontal = 12.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.CloudQueue, contentDescription = null, tint = BrandGreen, modifier = Modifier.size(12.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "Sync Success: Loaded ${s.count} rows from ${s.source}", 
+                                            color = BrandGreen, 
+                                            fontSize = 9.sp, 
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                    }
+                                }
+                            }
+                            is SheetSyncState.Error -> {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(Color(0xFF381414))
+                                        .padding(vertical = 4.dp, horizontal = 12.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.ErrorOutline, contentDescription = null, tint = Color(0xFFEF4444), modifier = Modifier.size(12.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = s.message, 
+                                            color = Color(0xFFEF4444), 
+                                            fontSize = 9.sp, 
+                                            fontWeight = FontWeight.Medium
+                                        )
+                                        Spacer(modifier = Modifier.weight(1f))
+                                        Text(
+                                            text = "LOG",
+                                            color = BrandGold,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.clickable { showSyncDiagnostics = true }
+                                        )
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Text(
+                                            text = "RETRY",
+                                            color = Color.White,
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.clickable { viewModel.loadSheetData() }
+                                        )
+                                    }
+                                }
+                            }
+                            else -> {}
+                        }
 
                         // GLOBAL HIGH-FIDELITY HORIZONTAL SCREEN-WIDE FILTER ROW FOR MAXIMUM VISUAL ACCESSIBILITY
                         Row(
@@ -1507,78 +987,219 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            viewModel.allSegments.forEach { seg ->
-                                val selected = filters.selectedSegments.contains(seg)
-                                val colorRef = resolveSeriesColor(seg)
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(if (selected) colorRef.copy(alpha = 0.12f) else SoftChipBg)
-                                        .border(
-                                            1.dp,
-                                            if (selected) colorRef else SlateBorder,
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .clickable { viewModel.toggleSegment(seg, true) }
-                                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(6.dp)
-                                                .background(if (selected) colorRef else Color.Gray, RoundedCornerShape(1.dp))
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = seg.uppercase(),
-                                            fontSize = 8.5.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (selected) colorRef else SlateTextLight
-                                        )
-                                        if (selected) {
-                                            Spacer(modifier = Modifier.width(4.dp))
-                                            Icon(
-                                                imageVector = Icons.Default.Check,
-                                                contentDescription = null,
-                                                tint = colorRef,
-                                                modifier = Modifier.size(10.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            Box(modifier = Modifier.width(1.dp).height(16.dp).background(SlateBorder))
-
                             Text(
-                                text = "CALENDAR RANGE:",
+                                text = "FILTERS:",
                                 fontSize = 8.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = SlateTextMuted,
                                 letterSpacing = 1.sp
                             )
-                            val startLabel = filters.customStartDate?.let { sdf.format(it) } ?: "Beginning"
-                            val endLabel = filters.customEndDate?.let { sdf.format(it) } ?: currentStats?.anchorDate?.let { sdf.format(it) } ?: "Latest"
-                            Row(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(SoftChipBg)
-                                    .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
-                                    .clickable {
-                                        showDatePickerDialog = true
+
+                            // 1. FY Drill down
+                            Box {
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(BrandGreen.copy(alpha = 0.12f))
+                                        .border(1.dp, BrandGreen, RoundedCornerShape(8.dp))
+                                        .clickable { fyDropdownExpanded = true }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = filters.selectedFY,
+                                        color = BrandGreen,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowDropDown,
+                                        contentDescription = "Select FY",
+                                        tint = BrandGreen,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                                DropdownMenu(
+                                    expanded = fyDropdownExpanded,
+                                    onDismissRequest = { fyDropdownExpanded = false },
+                                    modifier = Modifier
+                                        .background(SlateCard)
+                                        .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
+                                ) {
+                                    viewModel.allFinancialYears.forEach { fy ->
+                                        val selected = filters.selectedFY == fy
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    modifier = Modifier.fillMaxWidth()
+                                                ) {
+                                                    Text(
+                                                        text = fy,
+                                                        color = if (selected) BrandGreen else SlateTextLight,
+                                                        fontSize = 11.sp,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                                    )
+                                                    if (selected) {
+                                                        Spacer(modifier = Modifier.width(8.dp))
+                                                        Icon(
+                                                            imageVector = Icons.Default.Check,
+                                                            contentDescription = "selected",
+                                                            tint = BrandGreen,
+                                                            modifier = Modifier.size(12.dp)
+                                                        )
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                viewModel.updateFY(fy)
+                                                fyDropdownExpanded = false
+                                            }
+                                        )
                                     }
-                                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(Icons.Default.CalendarToday, contentDescription = null, tint = BrandGreen, modifier = Modifier.size(11.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "$startLabel — $endLabel",
-                                    color = SlateTextLight,
-                                    fontSize = 8.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = FontFamily.Monospace
-                                )
+                                }
+                            }
+
+                            // 2. Segment Drill down
+                            Box {
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(BrandGreen.copy(alpha = 0.12f))
+                                        .border(1.dp, BrandGreen, RoundedCornerShape(8.dp))
+                                        .clickable { segmentDropdownExpanded = true }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    val segmentLabel = if (filters.selectedSegments.size == 1) filters.selectedSegments.first() else "Multi-Segment"
+                                    Text(
+                                        text = segmentLabel.uppercase(),
+                                        color = BrandGreen,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowDropDown,
+                                        contentDescription = "Select Segment",
+                                        tint = BrandGreen,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                                DropdownMenu(
+                                    expanded = segmentDropdownExpanded,
+                                    onDismissRequest = { segmentDropdownExpanded = false },
+                                    modifier = Modifier
+                                        .background(SlateCard)
+                                        .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
+                                ) {
+                                    viewModel.allSegments.forEach { seg ->
+                                        val selected = filters.selectedSegments.contains(seg)
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    modifier = Modifier.fillMaxWidth()
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(6.dp)
+                                                            .background(if (selected) resolveSeriesColor(seg) else Color.Gray, RoundedCornerShape(1.dp))
+                                                    )
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    Text(
+                                                        text = seg,
+                                                        color = if (selected) BrandGreen else SlateTextLight,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                                    )
+                                                    if (selected) {
+                                                        Spacer(modifier = Modifier.width(8.dp))
+                                                        Icon(
+                                                            imageVector = Icons.Default.Check,
+                                                            contentDescription = "selected",
+                                                            tint = BrandGreen,
+                                                            modifier = Modifier.size(12.dp)
+                                                        )
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                viewModel.toggleSegment(seg, true)
+                                                segmentDropdownExpanded = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+
+                            // 3. Amount (Metric) Drill down
+                            Box {
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(BrandGreen.copy(alpha = 0.12f))
+                                        .border(1.dp, BrandGreen, RoundedCornerShape(8.dp))
+                                        .clickable { metricDropdownExpanded = true }
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = filters.activeMetric.name.uppercase(),
+                                        color = BrandGreen,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Icon(
+                                        imageVector = Icons.Default.ArrowDropDown,
+                                        contentDescription = "Select Metric",
+                                        tint = BrandGreen,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                                DropdownMenu(
+                                    expanded = metricDropdownExpanded,
+                                    onDismissRequest = { metricDropdownExpanded = false },
+                                    modifier = Modifier
+                                        .background(SlateCard)
+                                        .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
+                                ) {
+                                    DashboardMetric.values().forEach { m ->
+                                        val selected = filters.activeMetric == m
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    modifier = Modifier.fillMaxWidth()
+                                                ) {
+                                                    Text(
+                                                        text = m.name,
+                                                        color = if (selected) BrandGreen else SlateTextLight,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                                                    )
+                                                    if (selected) {
+                                                        Spacer(modifier = Modifier.width(8.dp))
+                                                        Icon(
+                                                            imageVector = Icons.Default.Check,
+                                                            contentDescription = "selected",
+                                                            tint = BrandGreen,
+                                                            modifier = Modifier.size(12.dp)
+                                                        )
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                viewModel.updateMetric(m)
+                                                metricDropdownExpanded = false
+                                            }
+                                        )
+                                    }
+                                }
                             }
 
                             IconButton(
@@ -1587,7 +1208,7 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.RestartAlt,
-                                    contentDescription = "Reset Date",
+                                    contentDescription = "Reset Filters",
                                     tint = SlateTextMuted,
                                     modifier = Modifier.size(14.dp)
                                 )
@@ -1623,29 +1244,29 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                             modifier = Modifier.padding(bottom = 6.dp)
                                         )
 
-                                        // All KPI cards in a professional Wint Wealth-grade grid on the same screen
+                                        // All KPI cards in a Metro-style grid
                                         Column(
                                             modifier = Modifier
                                                 .fillMaxWidth()
                                                 .padding(bottom = 14.dp),
-                                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                                            verticalArrangement = Arrangement.spacedBy(4.dp)
                                         ) {
                                             val periodLabel = if (filters.customStartDate != null) "PERIOD" else "ANCHOR DATE"
                                             
-                                            // Featured Master Card
+                                            // Featured Master Card (2x1)
                                             KpiCard(
                                                 title = periodLabel,
                                                 value = formatMetric(currentStats.periodSales, filters.activeMetric),
                                                 icon = Icons.Default.CalendarToday,
                                                 breakdown = currentStats.periodSalesBreakdown,
                                                 isActiveSolar = currentStats.activeSeriesNames.size == 1 && currentStats.activeSeriesNames.contains("Solar Modules"),
-                                                modifier = Modifier.fillMaxWidth().height(115.dp)
+                                                modifier = Modifier.fillMaxWidth().height(100.dp)
                                             )
 
-                                            // Grid Row 1 (MTD & QTD)
+                                            // Grid Row 1 (MTD & QTD) (1x1 | 1x1)
                                             Row(
                                                 modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                                             ) {
                                                 KpiCard(
                                                     title = "MTD PACING",
@@ -1655,7 +1276,7 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                                     pacingChange = currentStats.mtdPacingChange,
                                                     pacingLabel = "MoM",
                                                     isActiveSolar = currentStats.activeSeriesNames.size == 1 && currentStats.activeSeriesNames.contains("Solar Modules"),
-                                                    modifier = Modifier.weight(1f).height(110.dp)
+                                                    modifier = Modifier.weight(1f).aspectRatio(1f)
                                                 )
 
                                                 KpiCard(
@@ -1666,39 +1287,36 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                                     pacingChange = currentStats.qtdPacingChange,
                                                     pacingLabel = "QoQ",
                                                     isActiveSolar = currentStats.activeSeriesNames.size == 1 && currentStats.activeSeriesNames.contains("Solar Modules"),
-                                                    modifier = Modifier.weight(1f).height(110.dp)
+                                                    modifier = Modifier.weight(1f).aspectRatio(1f)
                                                 )
                                             }
 
-                                            // Grid Row 2 (YTD & PENDING)
-                                            Row(
-                                                modifier = Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                            ) {
-                                                KpiCard(
-                                                    title = "YTD REVENUES",
-                                                    value = formatMetric(currentStats.ytd, filters.activeMetric),
-                                                    icon = Icons.AutoMirrored.Filled.TrendingUp,
-                                                    breakdown = currentStats.ytdBreakdown,
-                                                    pacingChange = currentStats.ytdPacingChange,
-                                                    pacingLabel = "YoY",
-                                                    isActiveSolar = currentStats.activeSeriesNames.size == 1 && currentStats.activeSeriesNames.contains("Solar Modules"),
-                                                    modifier = Modifier.weight(1f).height(110.dp)
-                                                )
+                                            // Featured YTD Card (2x1)
+                                            KpiCard(
+                                                title = "YTD REVENUES",
+                                                value = formatMetric(currentStats.ytd, filters.activeMetric),
+                                                icon = Icons.AutoMirrored.Filled.TrendingUp,
+                                                breakdown = currentStats.ytdBreakdown,
+                                                pacingChange = currentStats.ytdPacingChange,
+                                                pacingLabel = "YoY",
+                                                isActiveSolar = currentStats.activeSeriesNames.size == 1 && currentStats.activeSeriesNames.contains("Solar Modules"),
+                                                modifier = Modifier.fillMaxWidth().height(100.dp)
+                                            )
 
-                                                KpiCard(
-                                                    title = "PENDING VALUE",
-                                                    value = formatMetric(currentStats.pending, filters.activeMetric),
-                                                    icon = Icons.Default.Layers,
-                                                    breakdown = currentStats.pendingBreakdown,
-                                                    isActiveSolar = currentStats.activeSeriesNames.size == 1 && currentStats.activeSeriesNames.contains("Solar Modules"),
-                                                    isFilterablePending = true,
-                                                    isPendingActive = filters.pendingOnly,
-                                                    onPendingToggle = { viewModel.togglePendingOnly() },
-                                                    modifier = Modifier.weight(1f).height(110.dp)
-                                                )
-                                            }
+                                            // Pending Card (Full width or split)
+                                            KpiCard(
+                                                title = "PENDING VALUE",
+                                                value = formatMetric(currentStats.pending, filters.activeMetric),
+                                                icon = Icons.Default.Layers,
+                                                breakdown = currentStats.pendingBreakdown,
+                                                isActiveSolar = currentStats.activeSeriesNames.size == 1 && currentStats.activeSeriesNames.contains("Solar Modules"),
+                                                isFilterablePending = true,
+                                                isPendingActive = filters.pendingOnly,
+                                                onPendingToggle = { viewModel.togglePendingOnly() },
+                                                modifier = Modifier.fillMaxWidth().height(80.dp)
+                                            )
                                         }
+
                                     }
                                 }
                                 1 -> {
@@ -1709,190 +1327,43 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                             .padding(12.dp),
                                         verticalArrangement = Arrangement.spacedBy(12.dp)
                                     ) {
-                                        // Flipping container using Crossfade
-                                        Crossfade(
-                                            targetState = pageTwoShowVisuals,
-                                            animationSpec = tween(220),
-                                            label = "AnalyticsFlip"
-                                        ) { showVisuals ->
-                                            if (showVisuals) {
-                                                // A. Interactive Canvas Chart Analytics Card
-                                                Card(
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    shape = RoundedCornerShape(20.dp),
-                                                    colors = CardDefaults.cardColors(containerColor = SlateCard),
-                                                    border = BorderStroke(1.dp, SlateBorder)
+                                        // Tabular Executive Matrix Table Starts Directly Here
+                                        Card(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            shape = RoundedCornerShape(20.dp),
+                                            colors = CardDefaults.cardColors(containerColor = SlateCard),
+                                            border = BorderStroke(1.dp, SlateBorder)
+                                        ) {
+                                            Column(modifier = Modifier.padding(12.dp)) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
                                                 ) {
-                                                    Column(modifier = Modifier.padding(14.dp)) {
-                                                        Row(
-                                                            modifier = Modifier.fillMaxWidth(),
-                                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                                            verticalAlignment = Alignment.CenterVertically
-                                                        ) {
-                                                            Column(modifier = Modifier.weight(1f)) {
-                                                                Text(
-                                                                    text = "VELOCITY INTERVAL METRIC",
-                                                                    fontSize = 10.sp,
-                                                                    fontWeight = FontWeight.Black,
-                                                                    color = SlateTextLight,
-                                                                    letterSpacing = 1.sp
-                                                                )
-                                                                Text(
-                                                                    text = "Tap legend to toggle • Hold to isolate",
-                                                                    fontSize = 8.sp,
-                                                                    color = SlateTextMuted
-                                                                )
-                                                            }
-                                                            Row(
-                                                                modifier = Modifier
-                                                                    .background(SlateBg, RoundedCornerShape(8.dp))
-                                                                    .border(1.dp, SlateBorder, RoundedCornerShape(8.dp))
-                                                                    .padding(2.dp)
-                                                            ) {
-                                                                VelocityMode.values().forEach { mode ->
-                                                                    val selected = filters.velocityMode == mode
-                                                                    Box(
-                                                                        modifier = Modifier
-                                                                            .clip(RoundedCornerShape(6.dp))
-                                                                            .background(if (selected) BrandGreen else Color.Transparent)
-                                                                            .clickable { viewModel.updateVelocityMode(mode) }
-                                                                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                                                                    ) {
-                                                                        Text(
-                                                                            text = mode.name.uppercase(),
-                                                                            color = if (selected) Color.White else SlateTextMuted,
-                                                                            fontSize = 8.sp,
-                                                                            fontWeight = FontWeight.Bold
-                                                                        )
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-
-                                                        Spacer(modifier = Modifier.height(14.dp))
-
-                                                        CustomCanvasChart(
-                                                            points = currentStats.velocitySeries,
-                                                            activeSeriesNames = currentStats.activeSeriesNames,
-                                                            excludedSeries = filters.excludedSeries,
-                                                            metricType = filters.activeMetric,
-                                                            velocityMode = filters.velocityMode,
-                                                            onScrubPoint = { idx, offset ->
-                                                                scrubbedPointIndex = idx
-                                                                scrubbedOffset = offset
-                                                            }
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(
+                                                            text = "REVENUE MATRIX",
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.Black,
+                                                            color = SlateTextLight,
+                                                            letterSpacing = 1.sp
                                                         )
-
-                                                        Spacer(modifier = Modifier.height(12.dp))
-
-                                                        Row(
-                                                            modifier = Modifier
-                                                                .fillMaxWidth()
-                                                                .horizontalScroll(rememberScrollState()),
-                                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                                        ) {
-                                                            currentStats.activeSeriesNames.forEach { series ->
-                                                                val excluded = filters.excludedSeries.contains(series)
-                                                                val clr = resolveSeriesColor(series)
-                                                                Row(
-                                                                    modifier = Modifier
-                                                                        .clip(RoundedCornerShape(6.dp))
-                                                                        .background(if (excluded) Color.Transparent else clr.copy(alpha = 0.08f))
-                                                                        .border(1.dp, if (excluded) SlateBorder else clr.copy(alpha = 0.3f), RoundedCornerShape(6.dp))
-                                                                        .pointerInput(series) {
-                                                                            detectTapGestures(
-                                                                                onTap = { viewModel.toggleSeriesExclusion(series) },
-                                                                                onLongPress = { viewModel.isolateLegendSeries(series) }
-                                                                            )
-                                                                        }
-                                                                        .padding(horizontal = 6.dp, vertical = 3.dp),
-                                                                    verticalAlignment = Alignment.CenterVertically
-                                                                ) {
-                                                                    Box(modifier = Modifier.size(8.dp).background(if (excluded) Color.Gray else clr, RoundedCornerShape(2.dp)))
-                                                                    Spacer(modifier = Modifier.width(6.dp))
-                                                                    Text(text = series, fontSize = 8.sp, color = if (excluded) SlateTextMuted else SlateTextLight, fontWeight = FontWeight.Bold)
-                                                                }
-                                                            }
-                                                        }
-                                                        
-                                                        Spacer(modifier = Modifier.height(6.dp))
-                                                        Row(
-                                                            modifier = Modifier.fillMaxWidth(),
-                                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                                            verticalAlignment = Alignment.CenterVertically
-                                                        ) {
-                                                            Text(
-                                                                text = "• Click header graph button to return to tabular view",
-                                                                fontSize = 7.5.sp,
-                                                                color = SlateTextMuted
-                                                            )
-                                                            IconButton(
-                                                                onClick = { pageTwoShowVisuals = false },
-                                                                modifier = Modifier.size(24.dp)
-                                                            ) {
-                                                                Icon(
-                                                                    imageVector = Icons.Default.GridOn,
-                                                                    contentDescription = "Go back to table",
-                                                                    tint = BrandGreen.copy(alpha = 0.7f),
-                                                                    modifier = Modifier.size(14.dp)
-                                                                )
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            } else {
-                                                // B. Tabular Executive Matrix Card
-                                                Card(
-                                                    modifier = Modifier.fillMaxWidth(),
-                                                    shape = RoundedCornerShape(20.dp),
-                                                    colors = CardDefaults.cardColors(containerColor = SlateCard),
-                                                    border = BorderStroke(1.dp, SlateBorder)
-                                                ) {
-                                                    Column(modifier = Modifier.padding(12.dp)) {
-                                                        Row(
-                                                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                                            verticalAlignment = Alignment.CenterVertically
-                                                        ) {
-                                                            Column(modifier = Modifier.weight(1f)) {
-                                                                Text(
-                                                                    text = "REVENUE MATRIX",
-                                                                    fontSize = 10.sp,
-                                                                    fontWeight = FontWeight.Black,
-                                                                    color = SlateTextLight,
-                                                                    letterSpacing = 1.sp
-                                                                )
-                                                                Text(
-                                                                    text = "Focus calculations instantly on touch headers",
-                                                                    fontSize = 8.sp,
-                                                                    color = SlateTextMuted
-                                                                )
-                                                            }
-                                                            IconButton(
-                                                                onClick = { pageTwoShowVisuals = true },
-                                                                modifier = Modifier
-                                                                    .size(28.dp)
-                                                                    .background(BrandGreen.copy(alpha = 0.1f), RoundedCornerShape(6.dp))
-                                                            ) {
-                                                                Icon(
-                                                                    imageVector = Icons.Default.ShowChart,
-                                                                    contentDescription = "Go to Visuals",
-                                                                    tint = BrandGreen,
-                                                                    modifier = Modifier.size(15.dp)
-                                                                )
-                                                            }
-                                                        }
-
-                                                        MatrixTableView(
-                                                            items = currentStats.matrix,
-                                                            currentMonth = filters.matrixMonth,
-                                                            currentQuarter = filters.selectedQuarter,
-                                                            selectedFY = filters.selectedFY,
-                                                            onMonthSelected = { viewModel.toggleMatrixMonth(it) },
-                                                            onQuarterSelected = { viewModel.toggleMatrixQuarter(it) }
+                                                        Text(
+                                                            text = "Focus calculations instantly on touch headers",
+                                                            fontSize = 8.sp,
+                                                            color = SlateTextMuted
                                                         )
                                                     }
                                                 }
+
+                                                MatrixTableView(
+                                                    items = currentStats.matrix,
+                                                    currentMonth = filters.matrixMonth,
+                                                    currentQuarter = filters.selectedQuarter,
+                                                    selectedFY = filters.selectedFY,
+                                                    onMonthSelected = { viewModel.toggleMatrixMonth(it) },
+                                                    onQuarterSelected = { viewModel.toggleMatrixQuarter(it) }
+                                                )
                                             }
                                         }
 
@@ -2070,7 +1541,7 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                             userEmail = userEmail,
                                             onLogout = {
                                                 sharedPrefs.edit().remove("grew_email").apply()
-                                                userEmail = null
+                                                viewModel.signOut()
                                             },
                                             viewModel = viewModel,
                                             onShowDiagnostics = { showDbDiagnostics = true }
@@ -2172,8 +1643,6 @@ fun DashboardScreen(viewModel: GrewViewModel) {
             }
         }
     }
-
-    } // closes else Block
 }
 
 @Composable
@@ -2707,113 +2176,105 @@ fun KpiCard(
 ) {
     val isPeriodSales = title.contains("PERIOD") || title.contains("ANCHOR")
     val isPending = title.contains("PENDING")
+    val isMTD = title.contains("MTD")
+    val isQTD = title.contains("QTD")
+    val isYTD = title.contains("YTD")
 
     val bgCol = when {
-        isPeriodSales -> Color(0xFF1B2436) // Gorgeous dark sapphire container
-        isPending -> Color(0xFF221626) // Sleek deep burgundy container
+        isPeriodSales -> Color(0xFF0078D7) // Windows Blue
+        isPending -> Color(0xFFCA5010) // Windows Orange/Brick
+        isMTD -> Color(0xFF107C10) // Windows Green
+        isQTD -> Color(0xFF00B7C3) // Windows Teal
+        isYTD -> Color(0xFF881798) // Windows Purple
         else -> SlateCard
     }
 
-    val tcCol = SlateTextLight
-
-    val subtitleCol = SlateTextMuted
-
-    val filterBorder = if (isFilterablePending && isPendingActive) {
-        BorderStroke(1.5.dp, Color(0xFFEC4899))
-    } else {
-        BorderStroke(1.dp, SlateBorder)
-    }
+    val tcCol = Color.White // Authentic Metro uses high contrast white text
 
     Card(
         modifier = modifier
-            .clip(RoundedCornerShape(24.dp))
+            .clip(RoundedCornerShape(0.dp)) // Sharp Metro corners
             .clickable(enabled = isFilterablePending) { onPendingToggle?.invoke() },
-        border = filterBorder,
-        colors = CardDefaults.cardColors(containerColor = bgCol)
+        shape = RoundedCornerShape(0.dp),
+        colors = CardDefaults.cardColors(containerColor = bgCol),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp) // Flat design
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = tcCol.copy(alpha = 0.03f),
+                tint = tcCol.copy(alpha = 0.15f), // subtle background icon
                 modifier = Modifier
-                    .size(80.dp)
+                    .size(64.dp)
                     .align(Alignment.BottomEnd)
+                    .padding(8.dp)
             )
 
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(14.dp),
+                    .padding(12.dp),
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                Column {
                     Text(
                         text = title,
-                        fontSize = 8.5.sp,
+                        fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
-                        color = if (isFilterablePending && isPendingActive) Color(0xFFEC4899) else subtitleCol,
-                        letterSpacing = 1.2.sp
+                        color = tcCol,
+                        letterSpacing = 0.5.sp
                     )
 
                     pacingChange?.let { pct ->
                         val isPos = pct >= 0
-                        val tc = if (isPos) Color(0xFF15803D) else Color(0xFFB91C1C)
                         val arrow = if (isPos) "↑" else "↓"
                         
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("$arrow${String.format("%.1f%%", Math.abs(pct))}", color = tc, fontSize = 9.5.sp, fontWeight = FontWeight.Black)
-                            Spacer(modifier = Modifier.width(2.dp))
-                            Text(pacingLabel, color = subtitleCol, fontSize = 7.5.sp, fontWeight = FontWeight.SemiBold)
-                        }
+                        Text(
+                            text = "$arrow${String.format("%.1f%%", Math.abs(pct))} $pacingLabel",
+                            color = tcCol.copy(alpha = 0.9f),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium
+                        )
                     }
                 }
 
                 Text(
                     text = value,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.ExtraBold,
                     color = tcCol,
                     fontFamily = FontFamily.Monospace,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
 
+                // Monochrome Metro-style breakdown bar
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(3.dp)
-                        .clip(RoundedCornerShape(1.dp))
+                        .height(2.dp)
                 ) {
                     val total = breakdown.values.sum()
                     if (total > 0f) {
-                        breakdown.forEach { (name, amt) ->
+                        breakdown.values.forEach { amt ->
                             val weight = (amt / total).toFloat()
                             if (weight > 0.005f) {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxHeight()
                                         .weight(weight)
-                                        .background(resolveSeriesColor(name))
+                                        .background(Color.White.copy(alpha = 0.6f))
                                 )
+                                Spacer(modifier = Modifier.width(1.dp))
                             }
                         }
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(Color.Gray.copy(alpha = 0.3f))
-                        )
                     }
                 }
             }
         }
     }
 }
+
 
 @Composable
 fun PacingCellValue(value: Double?, modifier: Modifier = Modifier) {
@@ -2890,77 +2351,67 @@ fun MatrixTableView(
             .fillMaxWidth()
             .background(SlateCard)
             .border(1.dp, SlateBorder, RoundedCornerShape(12.dp))
-            .padding(12.dp)
+            .padding(10.dp)
     ) {
-        // Sticky description row titles on the left - Perfectly fit label text comfortably on one line
+        // Sticky description row titles on the left
         Column(
-            modifier = Modifier.width(92.dp)
+            modifier = Modifier.width(88.dp)
         ) {
             // Header Space
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(42.dp),
+                    .height(40.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
                 Text(
                     text = "METRICS",
-                    fontSize = 7.5.sp,
+                    fontSize = 7.sp,
                     fontWeight = FontWeight.Black,
                     color = SlateTextMuted,
-                    letterSpacing = 0.5.sp,
-                    lineHeight = 10.sp
+                    letterSpacing = 0.5.sp
                 )
             }
             Spacer(modifier = Modifier.height(4.dp))
             
-            // Revenue Label
-            Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.CenterStart) {
-                Text("REVENUE (₹ Cr)", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextLight)
+            val labelHeight = 26.dp
+            Box(modifier = Modifier.fillMaxWidth().height(labelHeight), contentAlignment = Alignment.CenterStart) {
+                Text("REVENUE Cr", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextLight)
             }
-            // Volume Label
-            Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.CenterStart) {
-                Text("VOLUME (MW)", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextLight)
+            Box(modifier = Modifier.fillMaxWidth().height(labelHeight), contentAlignment = Alignment.CenterStart) {
+                Text("VOLUME MW", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextLight)
             }
-            // Qty Label
-            Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.CenterStart) {
-                Text("CELLS QTY (K)", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextLight)
+            Box(modifier = Modifier.fillMaxWidth().height(labelHeight), contentAlignment = Alignment.CenterStart) {
+                Text("QTY (K)", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextLight)
             }
             
-            // Space & Divider
             Spacer(modifier = Modifier.height(2.dp))
             HorizontalDivider(color = SlateBorder, thickness = 1.dp)
             Spacer(modifier = Modifier.height(2.dp))
 
-            // MoM Label
-            Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.CenterStart) {
-                Text("MoM PACING", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted)
+            Box(modifier = Modifier.fillMaxWidth().height(labelHeight), contentAlignment = Alignment.CenterStart) {
+                Text("MoM %", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted)
             }
-            // QoQ Label
-            Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.CenterStart) {
-                Text("QoQ PACING", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted)
+            Box(modifier = Modifier.fillMaxWidth().height(labelHeight), contentAlignment = Alignment.CenterStart) {
+                Text("QoQ %", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted)
             }
-            // YoY Label
-            Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.CenterStart) {
-                Text("YoY PACING", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted)
+            Box(modifier = Modifier.fillMaxWidth().height(labelHeight), contentAlignment = Alignment.CenterStart) {
+                Text("YoY %", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted)
             }
         }
 
-        Spacer(modifier = Modifier.width(8.dp))
+        Spacer(modifier = Modifier.width(6.dp))
 
-        // Horizontally scrollable data columns representing months and totals
+        // Horizontally scrollable data columns
         BoxWithConstraints(
             modifier = Modifier.weight(1f)
         ) {
-            // High fidelity adaptive layout mathematics:
-            // Ensures columns are spaced cleanly and scroll smoothly if too many columns exist.
-            // Minimum width of 100.dp guarantees ample spacing for longer numbers and labels.
             val totalCols = monthlyItems.size + (if (totalRow != null) 1 else 0)
-            val spacing = 6.dp
-            val spacingSpacing = spacing * (totalCols - 1)
-            val availableWidth = maxWidth - spacingSpacing
-            val minColWidth = 100.dp
-            val calculatedColWidth = if (totalCols > 0) availableWidth / totalCols.toFloat() else minColWidth
+            val spacing = 4.dp
+            // Ensure columns fit within width if possible, else use minimum width
+            val minColWidth = 72.dp 
+            val availableWidth = maxWidth - (spacing * (totalCols - 1))
+            val calculatedColWidth = if (totalCols > 0) availableWidth / totalCols else minColWidth
             val columnWidth = if (calculatedColWidth > minColWidth) calculatedColWidth else minColWidth
 
             Box(modifier = Modifier.fillMaxWidth()) {
@@ -2970,250 +2421,188 @@ fun MatrixTableView(
                         .horizontalScroll(scrollState),
                     horizontalArrangement = Arrangement.spacedBy(spacing)
                 ) {
-                monthlyItems.forEachIndexed { idx, row ->
-                    val qIdx = idx / 3
-                    val isPartSelected = currentQuarter == qIdx
-                    val isMonthSelected = currentMonth == row.monthName
+                    monthlyItems.forEachIndexed { idx, row ->
+                        val qIdx = idx / 3
+                        val isPartSelected = currentQuarter == qIdx
+                        val isMonthSelected = currentMonth == row.monthName
 
-                    val bgCol = when {
-                        isMonthSelected -> BrandGreen.copy(alpha = 0.14f)
-                        isPartSelected -> BrandBlue.copy(alpha = 0.08f)
-                        else -> Color.Transparent
-                    }
+                        val bgCol = when {
+                            isMonthSelected -> BrandGreen.copy(alpha = 0.15f)
+                            isPartSelected -> BrandBlue.copy(alpha = 0.1f)
+                            else -> Color.Transparent
+                        }
 
-                    Column(
-                        modifier = Modifier
-                            .width(columnWidth)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(bgCol)
-                            .clickable { onMonthSelected(row.monthName) }
-                            .padding(horizontal = 4.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        // Header (Quarter indicator clickable badge + Month Name with dynamic year tag)
                         Column(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .height(42.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
+                                .width(columnWidth)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(bgCol)
+                                .clickable { onMonthSelected(row.monthName) }
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(40.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(if (isPartSelected) BrandGreen.copy(alpha = 0.2f) else SlateBg)
+                                        .clickable { onQuarterSelected(qIdx) }
+                                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                                ) {
+                                    Text(
+                                        text = "Q${qIdx + 1}",
+                                        fontSize = 6.sp,
+                                        fontWeight = FontWeight.Black,
+                                        color = if (isPartSelected) BrandGreen else SlateTextMuted
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(1.dp))
+                                Text(
+                                    text = row.monthName.uppercase(),
+                                    fontSize = 7.5.sp,
+                                    fontWeight = if (isMonthSelected) FontWeight.Black else FontWeight.Bold,
+                                    color = if (isMonthSelected) BrandGreen else SlateTextLight
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+
+                            val cellHeight = 26.dp
+                            Box(modifier = Modifier.fillMaxWidth().height(cellHeight), contentAlignment = Alignment.Center) {
+                                Text(text = String.format("%.1f", row.revenueCr), fontSize = 8.sp, fontFamily = FontFamily.Monospace, color = SlateTextLight)
+                            }
+                            Box(modifier = Modifier.fillMaxWidth().height(cellHeight), contentAlignment = Alignment.Center) {
+                                Text(text = String.format("%.1f", row.capacityMw), fontSize = 8.sp, fontFamily = FontFamily.Monospace, color = SlateTextLight)
+                            }
+                            Box(modifier = Modifier.fillMaxWidth().height(cellHeight), contentAlignment = Alignment.Center) {
+                                Text(text = String.format("%.0f", row.volumeQty / 1000.0), fontSize = 8.sp, fontFamily = FontFamily.Monospace, color = SlateTextLight)
+                            }
+
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(SlateBorder))
+                            Spacer(modifier = Modifier.height(2.dp))
+
+                            PacingCellValue(value = row.momChange, modifier = Modifier.fillMaxWidth().height(cellHeight))
+                            PacingCellValue(value = row.qoqChange, modifier = Modifier.fillMaxWidth().height(cellHeight))
+                            PacingCellValue(value = row.yoyChange, modifier = Modifier.fillMaxWidth().height(cellHeight))
+                        }
+                    }
+
+                    if (totalRow != null) {
+                        Column(
+                            modifier = Modifier
+                                .width(columnWidth)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(BrandGreen.copy(alpha = 0.1f))
+                                .padding(horizontal = 2.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(if (isPartSelected) BrandGreen.copy(alpha = 0.25f) else SlateBg)
-                                    .clickable { onQuarterSelected(qIdx) }
-                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                                    .fillMaxWidth()
+                                    .height(40.dp),
+                                contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    text = "Q${qIdx + 1}",
-                                    fontSize = 6.5.sp,
-                                    fontWeight = FontWeight.Black,
-                                    color = if (isPartSelected) BrandGreen else SlateTextMuted
-                                )
+                                Text(text = "TOTAL", fontSize = 8.sp, fontWeight = FontWeight.Black, color = BrandGreen)
                             }
+                            Spacer(modifier = Modifier.height(4.dp))
+
+                            val cellHeight = 26.dp
+                            Box(modifier = Modifier.fillMaxWidth().height(cellHeight), contentAlignment = Alignment.Center) {
+                                Text(text = String.format("%.1f", totalRow.revenueCr), fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Black, color = BrandGreen)
+                            }
+                            Box(modifier = Modifier.fillMaxWidth().height(cellHeight), contentAlignment = Alignment.Center) {
+                                Text(text = String.format("%.1f", totalRow.capacityMw), fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Black, color = BrandGreen)
+                            }
+                            Box(modifier = Modifier.fillMaxWidth().height(cellHeight), contentAlignment = Alignment.Center) {
+                                Text(text = String.format("%.0f", totalRow.volumeQty / 1000.0), fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Black, color = BrandGreen)
+                            }
+
                             Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = getMonthLabelWithYear(row.monthName, selectedFY),
-                                fontSize = 8.sp,
-                                fontWeight = if (isMonthSelected) FontWeight.Black else FontWeight.Bold,
-                                color = if (isMonthSelected) BrandGreen else SlateTextLight
-                            )
+                            Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(BrandGreen.copy(alpha = 0.3f)))
+                            Spacer(modifier = Modifier.height(2.dp))
+
+                            repeat(3) { Box(modifier = Modifier.fillMaxWidth().height(cellHeight)) }
                         }
-                        Spacer(modifier = Modifier.height(4.dp))
-
-                        // 1. Revenue Cr Cell
-                        Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.Center) {
-                            Text(
-                                text = String.format("%.1f", row.revenueCr),
-                                fontSize = 8.5.sp,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = if (isMonthSelected) FontWeight.Bold else FontWeight.Medium,
-                                color = SlateTextLight
-                            )
-                        }
-
-                        // 2. Volume Capacities Cell
-                        Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.Center) {
-                            Text(
-                                text = String.format("%.1f", row.capacityMw),
-                                fontSize = 8.5.sp,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = if (isMonthSelected) FontWeight.Bold else FontWeight.Medium,
-                                color = SlateTextLight
-                            )
-                        }
-
-                        // 3. Qty K Cell
-                        Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.Center) {
-                            Text(
-                                text = String.format("%.0f", row.volumeQty / 1000.0),
-                                fontSize = 8.5.sp,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = if (isMonthSelected) FontWeight.Bold else FontWeight.Medium,
-                                color = SlateTextLight
-                            )
-                        }
-
-                        // Divider boundary
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(SlateBorder))
-                        Spacer(modifier = Modifier.height(2.dp))
-
-                        // 4. MoM Pacing pct
-                        PacingCellValue(value = row.momChange, modifier = Modifier.fillMaxWidth().height(28.dp))
-
-                        // 5. QoQ Pacing pct
-                        PacingCellValue(value = row.qoqChange, modifier = Modifier.fillMaxWidth().height(28.dp))
-
-                        // 6. YoY Pacing pct
-                        PacingCellValue(value = row.yoyChange, modifier = Modifier.fillMaxWidth().height(28.dp))
-                    }
-                }
-
-                // High Contrast TOTAL Column on extreme right
-                if (totalRow != null) {
-                    Column(
-                        modifier = Modifier
-                            .width(columnWidth)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(BrandGreen.copy(alpha = 0.08f))
-                            .padding(horizontal = 4.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(42.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Text(
-                                text = "TOTAL",
-                                fontSize = 8.5.sp,
-                                fontWeight = FontWeight.Black,
-                                color = BrandGreen
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
-
-                        // Total Row 1: Revenue
-                        Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.Center) {
-                            Text(
-                                text = String.format("%.1f", totalRow.revenueCr),
-                                fontSize = 8.5.sp,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Black,
-                                color = BrandGreen
-                            )
-                        }
-
-                        // Total Row 2: Capacity
-                        Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.Center) {
-                            Text(
-                                text = String.format("%.1f", totalRow.capacityMw),
-                                fontSize = 8.5.sp,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Black,
-                                color = BrandGreen
-                            )
-                        }
-
-                        // Total Row 3: Volume K Qty
-                        Box(modifier = Modifier.fillMaxWidth().height(28.dp), contentAlignment = Alignment.Center) {
-                            Text(
-                                text = String.format("%.0f", totalRow.volumeQty / 1000.0),
-                                fontSize = 8.5.sp,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Black,
-                                color = BrandGreen
-                            )
-                        }
-
-                        // Divider segment
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(BrandGreen.copy(alpha = 0.3f)))
-                        Spacer(modifier = Modifier.height(2.dp))
-
-                        // No composite pacing percentages in total columns
-                        PacingCellValue(value = null, modifier = Modifier.fillMaxWidth().height(28.dp))
-                        PacingCellValue(value = null, modifier = Modifier.fillMaxWidth().height(28.dp))
-                        PacingCellValue(value = null, modifier = Modifier.fillMaxWidth().height(28.dp))
                     }
                 }
             }
 
-                // Smooth Scroll Assist Overlays (Left/Right Chevrons with rich feedback)
-                val showLeftArrow = remember { derivedStateOf { scrollState.value > 0 } }
-                val showRightArrow = remember { derivedStateOf { scrollState.value < scrollState.maxValue } }
+            // Smooth Scroll Assist Overlays (Left/Right Chevrons with rich feedback)
+            val showLeftArrow = remember { derivedStateOf { scrollState.value > 0 } }
+            val showRightArrow = remember { derivedStateOf { scrollState.value < scrollState.maxValue } }
 
-                if (showLeftArrow.value) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.CenterStart)
-                            .matchParentSize()
-                            .width(36.dp)
-                            .background(
-                                brush = Brush.horizontalGradient(
-                                    colors = listOf(SlateCard.copy(alpha = 0.95f), Color.Transparent)
-                                )
-                            ),
-                        contentAlignment = Alignment.CenterStart
-                    ) {
-                        IconButton(
-                            onClick = {
-                                scope.launch {
-                                    scrollState.animateScrollTo((scrollState.value - 240).coerceAtLeast(0))
-                                }
-                            },
-                            modifier = Modifier
-                                .padding(start = 2.dp)
-                                .size(24.dp)
-                                .background(SlateBg.copy(alpha = 0.9f), CircleShape)
-                                .border(0.5.dp, SlateBorder, CircleShape)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.KeyboardArrowLeft,
-                                contentDescription = "Scroll Left",
-                                tint = BrandGreen,
-                                modifier = Modifier.size(16.dp)
+            if (showLeftArrow.value) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .matchParentSize()
+                        .width(36.dp)
+                        .background(
+                            brush = Brush.horizontalGradient(
+                                colors = listOf(SlateCard.copy(alpha = 0.95f), Color.Transparent)
                             )
-                        }
+                        ),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    IconButton(
+                        onClick = {
+                            scope.launch {
+                                scrollState.animateScrollTo((scrollState.value - 240).coerceAtLeast(0))
+                            }
+                        },
+                        modifier = Modifier
+                            .padding(start = 2.dp)
+                            .size(24.dp)
+                            .background(SlateBg.copy(alpha = 0.9f), CircleShape)
+                            .border(0.5.dp, SlateBorder, CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowLeft,
+                            contentDescription = "Scroll Left",
+                            tint = BrandGreen,
+                            modifier = Modifier.size(16.dp)
+                        )
                     }
                 }
+            }
 
-                if (showRightArrow.value) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.CenterEnd)
-                            .matchParentSize()
-                            .background(
-                                brush = Brush.horizontalGradient(
-                                    colors = listOf(Color.Transparent, SlateCard.copy(alpha = 0.95f))
-                                )
-                            ),
-                        contentAlignment = Alignment.CenterEnd
-                    ) {
-                        IconButton(
-                            onClick = {
-                                scope.launch {
-                                    scrollState.animateScrollTo((scrollState.value + 240).coerceAtMost(scrollState.maxValue))
-                                }
-                            },
-                            modifier = Modifier
-                                .padding(end = 2.dp)
-                                .size(24.dp)
-                                .background(SlateBg.copy(alpha = 0.9f), CircleShape)
-                                .border(0.5.dp, SlateBorder, CircleShape)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.KeyboardArrowRight,
-                                contentDescription = "Scroll Right",
-                                tint = BrandGreen,
-                                modifier = Modifier.size(16.dp)
+            if (showRightArrow.value) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .matchParentSize()
+                        .width(36.dp)
+                        .background(
+                            brush = Brush.horizontalGradient(
+                                colors = listOf(Color.Transparent, SlateCard.copy(alpha = 0.95f))
                             )
-                        }
+                        ),
+                    contentAlignment = Alignment.CenterEnd
+                ) {
+                    IconButton(
+                        onClick = {
+                            scope.launch {
+                                scrollState.animateScrollTo((scrollState.value + 240).coerceAtMost(scrollState.maxValue))
+                            }
+                        },
+                        modifier = Modifier
+                            .padding(end = 2.dp)
+                            .size(24.dp)
+                            .background(SlateBg.copy(alpha = 0.9f), CircleShape)
+                            .border(0.5.dp, SlateBorder, CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowRight,
+                            contentDescription = "Scroll Right",
+                            tint = BrandGreen,
+                            modifier = Modifier.size(16.dp)
+                        )
                     }
                 }
             }
@@ -3469,3 +2858,92 @@ fun CustomCanvasChart(
         }
     }
 }
+
+@Composable
+fun SyncDiagnosticsDialog(viewModel: GrewViewModel, onDismiss: () -> Unit) {
+    val logs by viewModel.diagnostics.collectAsState()
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier.fillMaxWidth().heightIn(max = 500.dp),
+            colors = CardDefaults.cardColors(containerColor = SlateCard),
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.dp, SlateBorder)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Terminal, contentDescription = null, tint = BrandGreen, modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text("Sync Engine Diagnostics", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = SlateTextLight)
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .background(Color.Black.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                        .verticalScroll(rememberScrollState())
+                        .padding(12.dp)
+                ) {
+                    Text(
+                        text = logs,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = Color(0xFF10B981)
+                    )
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(
+                    onClick = onDismiss,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = BrandGreen),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("CLOSE", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+suspend fun verifyEmailWithSupabase(email: String, url: String, key: String): Boolean = withContext(Dispatchers.IO) {
+    try {
+        val client = OkHttpClient()
+        val request = Request.Builder()
+            .url("$url/rest/v1/whitelist?email=eq.$email&select=id")
+            .addHeader("apikey", key)
+            .addHeader("Authorization", "Bearer $key")
+            .get()
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (response.isSuccessful) {
+                val body = response.body?.string() ?: ""
+                return@withContext body != "[]"
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    return@withContext false
+}
+
+suspend fun saveOtpInSupabase(email: String, otp: String, url: String, key: String): Boolean = withContext(Dispatchers.IO) {
+    try {
+        val client = OkHttpClient()
+        val json = """{"email":"$email", "otp":"$otp", "created_at":"${SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ", Locale.ENGLISH).format(Date())}"}"""
+        val request = Request.Builder()
+            .url("$url/rest/v1/otps")
+            .addHeader("apikey", key)
+            .addHeader("Authorization", "Bearer $key")
+            .addHeader("Content-Type", "application/json")
+            .addHeader("Prefer", "resolution=merge-duplicates")
+            .post(json.toRequestBody("application/json".toMediaTypeOrNull()))
+            .build()
+        client.newCall(request).execute().use { response ->
+            return@withContext response.isSuccessful
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    return@withContext false
+}
+

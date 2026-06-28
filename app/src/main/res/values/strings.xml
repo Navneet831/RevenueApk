@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">Grew Analytics</string>
+    <!-- Replace with your actual Google Web Client ID from the Google Cloud Console -->
+    <string name="google_web_client_id">179297502705-22r93immqstsvgv4mupb6a5mn6v5k0qi.apps.googleusercontent.com</string>
 </resources>

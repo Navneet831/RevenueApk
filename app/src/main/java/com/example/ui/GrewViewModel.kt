@@ -2,21 +2,53 @@ package com.example.ui
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.BuildConfig
+import com.example.GrewApplication
 import com.example.data.GrewData
 import com.example.data.GrewRecord
+import io.github.jan.supabase.auth.auth
+import io.github.jan.supabase.auth.status.SessionStatus
+import io.github.jan.supabase.postgrest.postgrest
+import io.github.jan.supabase.auth.providers.builtin.Email
+import io.github.jan.supabase.auth.providers.builtin.OTP
+import io.github.jan.supabase.auth.providers.builtin.IDToken
+import io.github.jan.supabase.auth.providers.Google
+import io.github.jan.supabase.auth.OtpType
+import io.github.jan.supabase.realtime.channel
+import io.github.jan.supabase.realtime.PostgresAction
+import io.github.jan.supabase.realtime.postgresChangeFlow
+import io.github.jan.supabase.realtime.realtime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONArray
+import org.json.JSONObject
+import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
+import java.util.Locale
 
 enum class DashboardMetric { Amount, MW, Qty }
 enum class VelocityMode { Quarterly, Monthly, Weekly, Daily }
 
+sealed class SheetSyncState {
+    object Idle : SheetSyncState()
+    object Syncing : SheetSyncState()
+    data class Success(val count: Int, val source: String, val sheetId: String) : SheetSyncState()
+    data class Error(val message: String) : SheetSyncState()
+}
+
 data class DashboardFilters(
+
     val selectedFY: String = "2025-26",
     val customStartDate: Date? = null,
     val customEndDate: Date? = null,
@@ -93,22 +125,38 @@ data class DashboardStats(
 )
 
 class GrewViewModel : ViewModel() {
-    private val allRecords = GrewData.generateRecords()
+    private val supabase = GrewApplication.supabase
+    private var allRecords: List<GrewRecord> = emptyList()
     private var calculationJob: Job? = null
     
-    val allSegments = GrewData.segments
-    val allSalesHeads = GrewData.salesHeads
-    val allCustomers = GrewData.customers
-    val allSkus = allRecords.map { it.wp }.distinct().sorted()
-    val allFinancialYears = allRecords.map { it.fiscalYear }.distinct().sortedDescending()
+    val userSession = supabase.auth.sessionStatus
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SessionStatus.NotAuthenticated(isSignOut = false))
+
+    val currentUserEmail = userSession.map { status ->
+        if (status is SessionStatus.Authenticated) status.session.user?.email else null
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    private val _syncState = MutableStateFlow<SheetSyncState>(SheetSyncState.Idle)
+    val syncState = _syncState.asStateFlow()
+
+    private val _diagnostics = MutableStateFlow<String>("")
+    val diagnostics = _diagnostics.asStateFlow()
+
+    private var currentAuthToken: String? = null
+
+    val allSegments get() = allRecords.map { it.segment }.distinct().sorted()
+    val allSalesHeads get() = allRecords.map { it.salesHead }.distinct().sorted()
+    val allCustomers get() = allRecords.map { it.customer }.distinct().sorted()
+    val allSkus get() = allRecords.map { it.wp }.distinct().sorted()
+    val allFinancialYears get() = allRecords.map { it.fiscalYear }.distinct().sortedDescending()
 
     // Find the absolute min/max dates
-    val globalMinDate = allRecords.minByOrNull { it.date.time }?.date ?: Date()
-    val globalMaxDate = allRecords.maxByOrNull { it.date.time }?.date ?: Date()
+    val globalMinDate get() = allRecords.minByOrNull { it.date.time }?.date ?: Date()
+    val globalMaxDate get() = allRecords.maxByOrNull { it.date.time }?.date ?: Date()
 
     private val _filters = MutableStateFlow(
         DashboardFilters(
-            selectedFY = allFinancialYears.firstOrNull() ?: "2025-26",
+            selectedFY = allRecords.map { it.fiscalYear }.distinct().sortedDescending().firstOrNull() ?: "2025-26",
             matrixMonth = "May",
             velocityMode = VelocityMode.Weekly
         )
@@ -122,8 +170,100 @@ class GrewViewModel : ViewModel() {
     private var activeAnchorDate: Date = globalMaxDate
 
     init {
+        setupRealtimeListener()
+        // Fetch sheets data asynchronously
+        loadSheetData()
         // Automatically default filters and range
         resetToLatestAnchor()
+    }
+
+    private fun setupRealtimeListener() {
+        viewModelScope.launch {
+            try {
+                val channel = supabase.realtime.channel("app_config_changes")
+                val changeFlow = channel.postgresChangeFlow<PostgresAction>(schema = "public") {
+                    table = "app_config"
+                }
+                channel.subscribe()
+                changeFlow.collect {
+                    loadSheetData()
+                }
+            } catch (e: Exception) {
+                _diagnostics.value += "Realtime Error: ${e.message}\n"
+            }
+        }
+    }
+
+    fun signIn(email: String, password: String) {
+        viewModelScope.launch {
+            try {
+                supabase.auth.signInWith(Email) {
+                    this.email = email
+                    this.password = password
+                }
+                loadSheetData()
+            } catch (e: Exception) {
+                _syncState.value = SheetSyncState.Error("Login failed: ${e.message}")
+            }
+        }
+    }
+
+    fun sendOtp(email: String) {
+        viewModelScope.launch {
+            try {
+                _syncState.value = SheetSyncState.Syncing
+                supabase.auth.signInWith(OTP) {
+                    this.email = email
+                }
+                _syncState.value = SheetSyncState.Idle
+            } catch (e: Exception) {
+                _syncState.value = SheetSyncState.Error("OTP Send failed: ${e.message}")
+            }
+        }
+    }
+
+    fun verifyOtp(email: String, token: String) {
+        viewModelScope.launch {
+            try {
+                _syncState.value = SheetSyncState.Syncing
+                supabase.auth.verifyEmailOtp(
+                    type = OtpType.Email.EMAIL,
+                    email = email,
+                    token = token
+                )
+                loadSheetData()
+            } catch (e: Exception) {
+                _syncState.value = SheetSyncState.Error("Verification failed: ${e.message}")
+            }
+        }
+    }
+
+    fun signInWithGoogle(idToken: String) {
+        viewModelScope.launch {
+            try {
+                _syncState.value = SheetSyncState.Syncing
+                supabase.auth.signInWith(IDToken) {
+                    this.idToken = idToken
+                    this.provider = Google
+                }
+                this@GrewViewModel.currentAuthToken = idToken
+                loadSheetData()
+            } catch (e: Exception) {
+                _syncState.value = SheetSyncState.Error("Google login failed: ${e.message}")
+            }
+        }
+    }
+
+    fun signOut() {
+        viewModelScope.launch {
+            try {
+                supabase.auth.signOut()
+                allRecords = emptyList()
+                recomputeStats()
+            } catch (e: Exception) {
+                _diagnostics.value += "Logout Error: ${e.message}\n"
+            }
+        }
     }
 
     fun resetToLatestAnchor() {
@@ -963,5 +1103,420 @@ class GrewViewModel : ViewModel() {
         val cal = Calendar.getInstance().apply { time = date }
         val m = cal.get(Calendar.MONTH)
         return if (m >= 3) m - 3 else m + 9
+    }
+
+    private suspend fun fetchRecordsDirectlyFromSupabase(): List<GrewRecord>? = withContext(Dispatchers.IO) {
+        val recordTables = listOf("revenue_master", "sales_transactions", "transactions", "grew_records", "sheet_records", "records", "sheet_data")
+        for (table in recordTables) {
+            try {
+                val response = supabase.postgrest.from(table).select()
+                val bodyStr = response.data
+                if (bodyStr.isNotEmpty() && bodyStr.trim().startsWith("[")) {
+                    val arr = JSONArray(bodyStr)
+                    if (arr.length() > 0) {
+                        val records = mutableListOf<GrewRecord>()
+                        for (i in 0 until arr.length()) {
+                            val obj = arr.optJSONObject(i) ?: continue
+                            // Parse fields dynamically with defaults
+                            var dateStr = ""
+                            var segment = "Solar Modules"
+                            var salesHead = "Amit Sharma"
+                            var customer = "Unknown Customer"
+                            var wp = "Generic WP"
+                            var valCr = 0.0
+                            var qty = 0.0
+                            var mw = 0.0
+                            var isPending = false
+
+                            val keysIter = obj.keys()
+                            while (keysIter.hasNext()) {
+                                val k = keysIter.next()
+                                val cleanK = k.lowercase(Locale.ROOT).replace(" ", "").replace("_", "")
+                                
+                                when {
+                                    cleanK == "date" || cleanK == "createdat" || cleanK == "timestamp" -> {
+                                        dateStr = obj.optString(k) ?: ""
+                                    }
+                                    cleanK == "segment" -> {
+                                        segment = obj.optString(k) ?: "Solar Modules"
+                                    }
+                                    cleanK == "saleshead" || cleanK == "agent" -> {
+                                        salesHead = obj.optString(k) ?: "Amit Sharma"
+                                    }
+                                    cleanK == "customer" || cleanK == "client" -> {
+                                        customer = obj.optString(k) ?: "Unknown Customer"
+                                    }
+                                    cleanK == "wp" || cleanK == "sku" || cleanK == "product" || cleanK == "wptext" -> {
+                                        wp = obj.optString(k) ?: "Generic WP"
+                                    }
+                                    cleanK == "valcr" || cleanK == "value" || cleanK == "revenue" || cleanK == "amount" -> {
+                                        val valCrStr = (obj.optString(k) ?: "0.0").replace(",", "").trim()
+                                        valCr = valCrStr.toDoubleOrNull() ?: 0.0
+                                    }
+                                    cleanK == "qty" || cleanK == "quantity" || cleanK == "volume" -> {
+                                        val qtyStr = (obj.optString(k) ?: "0.0").replace(",", "").trim()
+                                        qty = qtyStr.toDoubleOrNull() ?: 0.0
+                                    }
+                                    cleanK == "mw" || cleanK == "capacity" -> {
+                                        val mwStr = (obj.optString(k) ?: "0.0").replace(",", "").trim()
+                                        mw = mwStr.toDoubleOrNull() ?: 0.0
+                                    }
+                                    cleanK == "ispending" || cleanK == "pending" || cleanK == "status" || cleanK == "revenuestatus" -> {
+                                        val v = obj.get(k)
+                                        if (v is Boolean) {
+                                            isPending = v
+                                        } else {
+                                            val s = v.toString().lowercase(Locale.ROOT)
+                                            isPending = s == "true" || s == "yes" || s == "pending"
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            val dateVal = parseDateString(dateStr) ?: continue
+                                            
+                            records.add(
+                                GrewRecord(
+                                    date = dateVal,
+                                    segment = segment,
+                                    salesHead = salesHead,
+                                    customer = customer,
+                                    wp = wp,
+                                    valCr = valCr,
+                                    qty = qty,
+                                    mw = mw,
+                                    isPending = isPending
+                                )
+                            )
+
+                        }
+                        if (records.isNotEmpty()) {
+                            return@withContext records
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // Continue scanning candidates
+            }
+        }
+        return@withContext null
+    }
+
+    private suspend fun fetchCsvDataFromSupabaseConfig(): String? = withContext(Dispatchers.IO) {
+        val configTables = listOf("app_config", "sheet_config", "settings", "config", "sheets")
+        for (table in configTables) {
+            try {
+                val response = supabase.postgrest.from(table).select()
+                val bodyStr = response.data
+                if (bodyStr.isNotEmpty() && bodyStr.trim().startsWith("[")) {
+                    val arr = JSONArray(bodyStr)
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        val keysIter = obj.keys()
+                        var optionKey: String? = null
+                        var optionVal: String? = null
+                        while (keysIter.hasNext()) {
+                            val k = keysIter.next()
+                            val v = obj.optString(k)?.trim() ?: ""
+                            if (k.equals("key", ignoreCase = true) || k.equals("name", ignoreCase = true) || k.equals("config_key", ignoreCase = true) || k.equals("configKey", ignoreCase = true)) {
+                                optionKey = v
+                            } else if (k.equals("value", ignoreCase = true) || k.equals("val", ignoreCase = true) || k.equals("config_value", ignoreCase = true) || k.equals("configValue", ignoreCase = true) || k.equals("content", ignoreCase = true)) {
+                                optionVal = v
+                            }
+                        }
+                        if (optionKey != null && optionVal != null) {
+                            if (optionKey.equals("SHEET_CSV", ignoreCase = true) || 
+                                optionKey.equals("CSV_DATA", ignoreCase = true) || 
+                                optionKey.equals("SHEET_DATA", ignoreCase = true) || 
+                                optionKey.equals("CSV_CONTENT", ignoreCase = true) ||
+                                optionKey.equals("SHEET_CONTENT", ignoreCase = true) ||
+                                optionKey.equals("SHEET_TEXT", ignoreCase = true)) {
+                                if (optionVal.isNotEmpty() && optionVal.contains(",") && optionVal.contains("\n")) {
+                                    return@withContext optionVal
+                                }
+                            }
+                        }
+                        
+                        // Alternatively, check all fields directly in the object for a giant CSV field
+                        val objectKeys = obj.keys()
+                        while (objectKeys.hasNext()) {
+                            val k = objectKeys.next()
+                            if (k.equals("csv_data", ignoreCase = true) || 
+                                k.equals("sheet_csv", ignoreCase = true) || 
+                                k.equals("csv_content", ignoreCase = true) || 
+                                k.equals("csv", ignoreCase = true)) {
+                                val valStr = obj.optString(k)?.trim() ?: ""
+                                if (valStr.isNotEmpty() && valStr.contains(",") && valStr.contains("\n")) {
+                                    return@withContext valStr
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                // Continue scanning candidates
+            }
+        }
+        return@withContext null
+    }
+
+    private suspend fun fetchSheetIdFromSupabase(): String? = withContext(Dispatchers.IO) {
+        val tableCandidates = listOf("app_config", "sheet_config", "settings", "config", "sheets")
+        for (table in tableCandidates) {
+            try {
+                val response = supabase.postgrest[table].select()
+                val bodyStr = response.data
+                if (bodyStr.isNotEmpty() && bodyStr != "[]") {
+                    val arr = JSONArray(bodyStr)
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        val keys = obj.keys()
+                        while (keys.hasNext()) {
+                            val k = keys.next()
+                            val v = obj.optString(k)?.trim() ?: ""
+                            if (v.equals("SHEET_ID", ignoreCase = true)) {
+                                val rowKeys = obj.keys()
+                                while (rowKeys.hasNext()) {
+                                    val rk = rowKeys.next()
+                                    val rv = obj.optString(rk).trim()
+                                    if (isValidGoogleSheetId(rv)) return@withContext rv
+                                }
+                            } else if (isValidGoogleSheetId(v)) {
+                                if (k.equals("sheet_id", ignoreCase = true) || k.equals("value", ignoreCase = true)) return@withContext v
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) { }
+        }
+        null
+    }
+
+    fun loadSheetData() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _syncState.value = SheetSyncState.Syncing
+            _diagnostics.value = "Starting Sync Engine via Supabase SDK...\n"
+            
+            var syncSource = "Supabase SDK"
+
+            _diagnostics.value += "Checking Supabase Tables for direct records...\n"
+            val supabaseRecords = fetchRecordsDirectlyFromSupabase()
+            if (supabaseRecords != null && supabaseRecords.isNotEmpty()) {
+                allRecords = supabaseRecords
+                _syncState.value = SheetSyncState.Success(supabaseRecords.size, "Supabase Database Table", "supabase_direct")
+                resetToLatestAnchor()
+                return@launch
+            }
+
+            _diagnostics.value += "Checking Supabase Config for CSV content...\n"
+            val supabaseCsv = fetchCsvDataFromSupabaseConfig()
+            if (supabaseCsv != null && supabaseCsv.isNotEmpty()) {
+                val records = parseSheetData(supabaseCsv)
+                if (records.isNotEmpty()) {
+                    allRecords = records
+                    _syncState.value = SheetSyncState.Success(records.size, "Supabase Config CSV", "supabase_csv")
+                    resetToLatestAnchor()
+                    return@launch
+                }
+            }
+
+            _diagnostics.value += "Fetching SHEET_ID from Supabase...\n"
+            val resolvedSheetId = fetchSheetIdFromSupabase()
+
+            if (resolvedSheetId == null) {
+                _syncState.value = SheetSyncState.Error("SHEET_ID not found in Supabase. Please add Key: SHEET_ID in 'app_config' table.")
+                return@launch
+            }
+
+            _diagnostics.value += "Resolved SHEET_ID: $resolvedSheetId. Fetching from Google Sheets...\n"
+            try {
+                val csvUrl = "https://docs.google.com/spreadsheets/d/$resolvedSheetId/export?format=csv"
+                val client = OkHttpClient()
+                val requestBuilder = Request.Builder().url(csvUrl).get()
+                currentAuthToken?.let { requestBuilder.addHeader("Authorization", "Bearer $it") }
+                
+                client.newCall(requestBuilder.build()).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val csvText = response.body?.string() ?: ""
+                        val records = parseSheetData(csvText)
+                        if (records.isNotEmpty()) {
+                            allRecords = records
+                            _syncState.value = SheetSyncState.Success(records.size, "Google Sheets", resolvedSheetId)
+                            resetToLatestAnchor()
+                        } else {
+                            _syncState.value = SheetSyncState.Error("Google sheet parsing returned zero records.")
+                        }
+                    } else {
+                        _syncState.value = SheetSyncState.Error("Google Sheets HTTP Error: ${response.code}")
+                    }
+                }
+            } catch (e: Exception) {
+                _syncState.value = SheetSyncState.Error("Failed to fetch Google Sheet: ${e.message}")
+            }
+        }
+    }
+
+    private fun isValidGoogleSheetId(id: String): Boolean {
+        // Relaxed validation to support various Google Sheet ID lengths (typically 44, but can vary)
+        return id.length >= 30 && id.first() == '1' && id.all { it.isLetterOrDigit() || it == '-' || it == '_' }
+    }
+
+    private fun parseCsvLine(line: String): List<String> {
+        val result = mutableListOf<String>()
+        var inQuotes = false
+        val current = StringBuilder()
+        var i = 0
+        while (i < line.length) {
+            val char = line[i]
+            if (char == '"') {
+                inQuotes = !inQuotes
+            } else if (char == ',' && !inQuotes) {
+                result.add(current.toString().trim())
+                current.setLength(0)
+            } else {
+                current.append(char)
+            }
+            i++
+        }
+        result.add(current.toString().trim())
+        return result
+    }
+
+    private fun parseTsvLine(line: String): List<String> {
+        return line.split("\t").map { it.trim().removeSurrounding("\"") }
+    }
+
+    private fun parseDateString(dateStr: String): Date? {
+        if (dateStr.trim().isEmpty()) return null
+        val cleaned = dateStr.trim()
+        val formats = listOf(
+            "yyyy-MM-dd",
+            "dd/MM/yyyy",
+            "MM/dd/yyyy",
+            "yyyy/MM/dd",
+            "dd-MM-yyyy",
+            "dd-MMM-yyyy",
+            "dd MMM yyyy",
+            "MMM dd, yyyy",
+            "yyyy-MM-dd'T'HH:mm:ss",
+            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+            "yyyy-MM-dd HH:mm:ss"
+        )
+        for (f in formats) {
+            try {
+                val sdf = SimpleDateFormat(f, Locale.ENGLISH)
+                return sdf.parse(cleaned)
+            } catch (e: Exception) {
+                // Continue
+            }
+        }
+        val longVal = cleaned.toLongOrNull()
+        if (longVal != null) {
+            return Date(longVal)
+        }
+        return null
+    }
+
+    private fun parseSheetData(csvContent: String): List<GrewRecord> {
+        val records = mutableListOf<GrewRecord>()
+        val lines = csvContent.split(java.util.regex.Pattern.compile("\\r?\\n"))
+        if (lines.isEmpty()) return emptyList()
+
+        val headerLine = lines[0]
+        val isTsv = headerLine.count { it == '\t' } > headerLine.count { it == ',' }
+        val headers = if (isTsv) parseTsvLine(headerLine) else parseCsvLine(headerLine)
+        
+        val headerToIdx = headers.mapIndexed { idx, h -> 
+            val cleaned = h.lowercase(Locale.ROOT).replace(" ", "").replace("_", "")
+            cleaned to idx
+        }.toMap()
+
+        val dateIdx = headerToIdx["invoicedate"] ?: 
+                      headerToIdx.keys.firstOrNull { it.contains("invoice") && it.contains("date") }?.let { headerToIdx[it] } ?:
+                      headerToIdx["date"] ?: 
+                      headerToIdx["createdat"] ?: 
+                      headerToIdx.keys.firstOrNull { it.contains("date") }?.let { headerToIdx[it] } ?: -1
+        
+        val segmentIdx = headerToIdx["segment"] ?: 
+                         headerToIdx.keys.firstOrNull { it.contains("segment") || it.contains("category") || it.contains("type") }?.let { headerToIdx[it] } ?: -1
+        
+        val salesHeadIdx = headerToIdx["saleshead"] ?: 
+                           headerToIdx["sales_head"] ?: 
+                           headerToIdx["agent"] ?: 
+                           headerToIdx.keys.firstOrNull { it.contains("sales") || it.contains("head") || it.contains("manager") || it.contains("owner") }?.let { headerToIdx[it] } ?: -1
+        
+        val customerIdx = headerToIdx["customer"] ?: 
+                          headerToIdx["client"] ?: 
+                          headerToIdx.keys.firstOrNull { it.contains("customer") || it.contains("client") || it.contains("buyer") }?.let { headerToIdx[it] } ?: -1
+        
+        val wpIdx = headerToIdx["wp"] ?: 
+                    headerToIdx["sku"] ?: 
+                    headerToIdx["product"] ?: 
+                    headerToIdx["wptext"] ?: 
+                    headerToIdx.keys.firstOrNull { it.contains("product") || it.contains("item") || it.contains("sku") || it.contains("material") }?.let { headerToIdx[it] } ?: -1
+        
+        val valCrIdx = headerToIdx["valcr"] ?: 
+                       headerToIdx["value"] ?: 
+                       headerToIdx["revenue"] ?: 
+                       headerToIdx["amount"] ?: 
+                       headerToIdx.keys.firstOrNull { it.contains("revenue") || it.contains("value") || it.contains("amount") || it.contains("total") || it.contains("cr") }?.let { headerToIdx[it] } ?: -1
+        
+        val qtyIdx = headerToIdx["qty"] ?: 
+                     headerToIdx["quantity"] ?: 
+                     headerToIdx["volume"] ?: 
+                     headerToIdx.keys.firstOrNull { it.contains("qty") || it.contains("quantity") || it.contains("volume") || it.contains("count") || it.contains("units") }?.let { headerToIdx[it] } ?: -1
+        
+        val mwIdx = headerToIdx["mw"] ?: 
+                    headerToIdx["capacity"] ?: 
+                    headerToIdx.keys.firstOrNull { it.contains("mw") || it.contains("capacity") || it.contains("power") || it.contains("watt") }?.let { headerToIdx[it] } ?: -1
+        
+        val pendingIdx = headerToIdx["ispending"] ?: 
+                         headerToIdx["pending"] ?: 
+                         headerToIdx["status"] ?: 
+                         headerToIdx["revenuestatus"] ?: 
+                         headerToIdx.keys.firstOrNull { it.contains("pending") || it.contains("status") || it.contains("stage") }?.let { headerToIdx[it] } ?: -1
+
+        for (i in 1 until lines.size) {
+            val line = lines[i]
+            if (line.trim().isEmpty()) continue
+            val cells = if (isTsv) parseTsvLine(line) else parseCsvLine(line)
+            if (cells.size < 2) continue // Relaxed: at least 2 columns required (date + something else)
+
+            try {
+                val rawDate = if (dateIdx >= 0) cells.getOrNull(dateIdx) ?: "" else ""
+                val parsedDate = parseDateString(rawDate) ?: if (dateIdx == -1) Date() else continue
+
+                val segment = cells.getOrNull(segmentIdx) ?: "Solar Modules"
+                val salesHead = cells.getOrNull(salesHeadIdx) ?: "Amit Sharma"
+                val customer = cells.getOrNull(customerIdx) ?: "Unknown Customer"
+                val wp = cells.getOrNull(wpIdx) ?: "Generic WP"
+
+                val valCr = cells.getOrNull(valCrIdx)?.replace(",", "")?.toDoubleOrNull() ?: 0.0
+                val qty = cells.getOrNull(qtyIdx)?.replace(",", "")?.toDoubleOrNull() ?: 0.0
+                val mw = cells.getOrNull(mwIdx)?.replace(",", "")?.toDoubleOrNull() ?: 0.0
+
+                val rawPending = cells.getOrNull(pendingIdx) ?: ""
+                val isPending = rawPending.equals("true", ignoreCase = true) || 
+                                rawPending.equals("yes", ignoreCase = true) || 
+                                rawPending.equals("pending", ignoreCase = true)
+
+                records.add(
+                    GrewRecord(
+                        date = parsedDate,
+                        segment = segment,
+                        salesHead = salesHead,
+                        customer = customer,
+                        wp = wp,
+                        valCr = valCr,
+                        qty = qty,
+                        mw = mw,
+                        isPending = isPending
+                    )
+                )
+            } catch (e: Exception) {
+                // Gracefully pass bad lines
+            }
+        }
+        return records
     }
 }

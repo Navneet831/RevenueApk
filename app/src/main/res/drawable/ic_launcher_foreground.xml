@@ -7,15 +7,15 @@
     <group
         android:scaleX="0.6"
         android:scaleY="0.6"
-        android:translateX="27.45"
-        android:translateY="18.75">
+        android:translateX="24"
+        android:translateY="24">
         <!-- Main Geometric Dart Shape -->
         <path
-            android:fillColor="#60B446"
+            android:fillColor="@color/brand_green"
             android:pathData="M 4 17.5 L 88.5 17.5 L 47.5 95.5 L 42.5 47.5 Z" />
         <!-- Edge Artifact -->
         <path
-            android:fillColor="#60B446"
+            android:fillColor="@color/brand_green"
             android:pathData="M 0 85.5 L 8 100 L 0 100 Z" />
     </group>
 </vector>
