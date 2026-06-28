@@ -1202,6 +1202,61 @@ class GrewViewModel : ViewModel() {
         return@withContext null
     }
 
+    private suspend fun fetchRecordsFromPostgres(): List<GrewRecord>? = withContext(Dispatchers.IO) {
+        val records = mutableListOf<GrewRecord>()
+        var connection: java.sql.Connection? = null
+        var statement: java.sql.Statement? = null
+        var resultSet: java.sql.ResultSet? = null
+        try {
+            Class.forName("org.postgresql.Driver")
+            val url = "jdbc:postgresql://80.225.203.238:5432/Grewdb"
+            connection = java.sql.DriverManager.getConnection(url, "navneet", "Navn@98765")
+            statement = connection.createStatement()
+            resultSet = statement.executeQuery("SELECT \"Invoice date\", \"Cust_name\", \"Segment\", \"Sales Head\", \"Mat Desc\", \"Taxable Value\", \"SalesQty\", \"MW\", \"Invoice Status\" FROM revenue")
+            
+            while (resultSet.next()) {
+                val invoiceDate = resultSet.getTimestamp("Invoice date")
+                val dateVal = if (invoiceDate != null) java.util.Date(invoiceDate.time) else java.util.Date()
+                
+                val custName = resultSet.getString("Cust_name") ?: "Unknown Customer"
+                val segment = resultSet.getString("Segment") ?: "Solar Modules"
+                val salesHead = resultSet.getString("Sales Head") ?: "Amit Sharma"
+                val matDesc = resultSet.getString("Mat Desc") ?: "Generic WP"
+                
+                val taxableValue = resultSet.getDouble("Taxable Value")
+                val valCr = taxableValue / 10000000.0 // Convert to Crores
+                
+                val salesQty = resultSet.getDouble("SalesQty")
+                val mw = resultSet.getDouble("MW")
+                
+                val status = resultSet.getString("Invoice Status")
+                val isPending = status == "X"
+                
+                records.add(
+                    GrewRecord(
+                        date = dateVal,
+                        segment = segment,
+                        salesHead = salesHead,
+                        customer = custName,
+                        wp = matDesc,
+                        valCr = valCr,
+                        qty = salesQty,
+                        mw = mw,
+                        isPending = isPending
+                    )
+                )
+            }
+            if (records.isNotEmpty()) records else null
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        } finally {
+            try { resultSet?.close() } catch (e: Exception) {}
+            try { statement?.close() } catch (e: Exception) {}
+            try { connection?.close() } catch (e: Exception) {}
+        }
+    }
+
     private suspend fun fetchCsvDataFromSupabaseConfig(): String? = withContext(Dispatchers.IO) {
         val configTables = listOf("app_config", "sheet_config", "settings", "config", "sheets")
         for (table in configTables) {
@@ -1295,11 +1350,18 @@ class GrewViewModel : ViewModel() {
     fun loadSheetData() {
         viewModelScope.launch(Dispatchers.IO) {
             _syncState.value = SheetSyncState.Syncing
-            _diagnostics.value = "Starting Sync Engine via Supabase SDK...\n"
+            _diagnostics.value = "Starting Sync Engine via PostgreSQL direct connection...\n"
             
-            var syncSource = "Supabase SDK"
-
-            _diagnostics.value += "Checking Supabase Tables for direct records...\n"
+            _diagnostics.value += "Connecting to PostgreSQL Database (80.225.203.238)...\n"
+            val pgRecords = fetchRecordsFromPostgres()
+            if (pgRecords != null && pgRecords.isNotEmpty()) {
+                allRecords = pgRecords
+                _syncState.value = SheetSyncState.Success(pgRecords.size, "PostgreSQL Table (revenue)", "postgres_direct")
+                resetToLatestAnchor()
+                return@launch
+            }
+            
+            _diagnostics.value += "PostgreSQL fetch returned no records. Trying Supabase fallback...\n"
             val supabaseRecords = fetchRecordsDirectlyFromSupabase()
             if (supabaseRecords != null && supabaseRecords.isNotEmpty()) {
                 allRecords = supabaseRecords

@@ -756,9 +756,6 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                             titleContentColor = SlateTextLight,
                             navigationIconContentColor = BrandGreen
                         ),
-                        navigationIcon = {
-                            GrewEnergyLogo(showText = false, modifier = Modifier.padding(start = 12.dp))
-                        },
                         title = {
 
                             val startLabel = filters.customStartDate?.let { sdf.format(it) } ?: sdf.format(viewModel.globalMinDate)
@@ -2162,11 +2159,11 @@ fun KpiCard(
     val isYTD = title.contains("YTD")
 
     val bgCol = when {
-        isPeriodSales -> Color(0xFF0078D7) // Windows Blue
-        isPending -> Color(0xFFCA5010) // Windows Orange/Brick
-        isMTD -> Color(0xFF107C10) // Windows Green
-        isQTD -> Color(0xFF00B7C3) // Windows Teal
-        isYTD -> Color(0xFF881798) // Windows Purple
+        isPeriodSales -> Color(0xFF1E3A8A) // Deep Navy Blue
+        isPending -> Color(0xFF7C2D12) // Muted Rust Orange
+        isMTD -> Color(0xFF064E3B) // Dark Emerald Green
+        isQTD -> Color(0xFF0F766E) // Muted Teal
+        isYTD -> Color(0xFF312E81) // Deep Indigo Purple
         else -> SlateCard
     }
 

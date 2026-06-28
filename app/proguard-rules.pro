@@ -18,4 +18,8 @@
 
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# PostgreSQL JDBC Driver rules
+-dontwarn org.postgresql.**
+-keep class org.postgresql.** { *; }
+-keep class java.sql.** { *; }
+

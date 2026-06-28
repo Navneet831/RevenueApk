@@ -12,7 +12,7 @@ android {
 
   defaultConfig {
     applicationId = "com.aistudio.rewanalytics.khwgpq"
-    minSdk = 24
+    minSdk = 26
     targetSdk = 36
     versionCode = 1
     versionName = "1.0"
@@ -91,6 +91,9 @@ dependencies {
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
   
+  // PostgreSQL
+  implementation("org.postgresql:postgresql:42.7.3")
+
   // Supabase
   implementation(platform(libs.supabase.bom))
   implementation(libs.supabase.postgrest)
