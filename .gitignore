@@ -19,4 +19,7 @@ debug.keystore
 debug.keystore.base64
 classes.jar
 .build-outputs/
-
+*.hprof
+*.bak
+*.apk
+revenue_cache.json

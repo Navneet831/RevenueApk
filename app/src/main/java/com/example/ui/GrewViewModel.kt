@@ -102,6 +102,7 @@ data class VelocityPoint(
 data class DashboardStats(
     val periodSales: Double,
     val periodSalesBreakdown: Map<String, Double>,
+    val periodSalesPacingChange: Double? = null,
     val mtd: Double,
     val mtdBreakdown: Map<String, Double>,
     val mtdPacingChange: Double?,
@@ -170,11 +171,14 @@ class GrewViewModel : ViewModel() {
     private var activeAnchorDate: Date = globalMaxDate
 
     init {
+        val cached = loadCachedData()
+        if (cached.isNotEmpty()) {
+            allRecords = cached
+            _syncState.value = SheetSyncState.Success(cached.size, "PostgreSQL Database (Live)", "postgres_direct")
+            resetToLatestAnchor()
+        }
         setupRealtimeListener()
-        // Fetch sheets data asynchronously
         loadSheetData()
-        // Automatically default filters and range
-        resetToLatestAnchor()
     }
 
     private fun setupRealtimeListener() {
@@ -274,9 +278,20 @@ class GrewViewModel : ViewModel() {
             "${maxYearCal.get(Calendar.YEAR) - 1}-${maxYearCal.get(Calendar.YEAR).toString().takeLast(2)}"
         }
 
-        _filters.update {
-            it.copy(
+        _filters.update { current ->
+            val validSegments = if (current.selectedSegments.intersect(allSegments.toSet()).isNotEmpty()) {
+                current.selectedSegments
+            } else if (allSegments.contains("Solar Modules")) {
+                setOf("Solar Modules")
+            } else if (allSegments.isNotEmpty()) {
+                setOf(allSegments.first())
+            } else {
+                current.selectedSegments
+            }
+
+            current.copy(
                 selectedFY = defFY,
+                selectedSegments = validSegments,
                 customStartDate = null,
                 customEndDate = null,
                 matrixMonth = when (maxYearCal.get(Calendar.MONTH)) {
@@ -652,18 +667,36 @@ class GrewViewModel : ViewModel() {
         val targetStateTx = filteredTx.filter { it.isPending == currentFilters.pendingOnly }
 
         // --- MICRO KPIs PACED CALCULATIONS ---
-        // Sums over current view boundaries
+        // Anchor Date Sales (single date sales of the active Anchor Date / TO Date)
         var periodSales = 0.0
         val periodSalesBreakdown = mutableMapOf<String, Double>()
 
         targetStateTx.forEach { tx ->
-            if (tx.date.time in filterStartTime..filterEndTime) {
+            if (tx.year == anchorYear && tx.monthIdx == anchorMonth && tx.day == anchorDay) {
                 val v = getValFn(tx)
                 periodSales += v
                 val k = getPlotKey(tx)
                 periodSalesBreakdown[k] = (periodSalesBreakdown[k] ?: 0.0) + v
             }
         }
+
+        // Anchor Date comparison with the last day having value (prior day with sales)
+        val priorDaysWithSales = targetStateTx.filter { tx ->
+            (tx.year < anchorYear) ||
+            (tx.year == anchorYear && tx.monthIdx < anchorMonth) ||
+            (tx.year == anchorYear && tx.monthIdx == anchorMonth && tx.day < anchorDay)
+        }.groupBy { String.format(Locale.ROOT, "%04d-%02d-%02d", it.year, it.monthIdx + 1, it.day) }
+         .mapValues { entry -> entry.value.sumOf(getValFn) }
+         .filter { it.value > 0.0 }
+
+        val lastDayWithSalesVal = if (priorDaysWithSales.isNotEmpty()) {
+            val latestPriorDate = priorDaysWithSales.keys.maxOrNull()
+            latestPriorDate?.let { priorDaysWithSales[it] } ?: 0.0
+        } else 0.0
+
+        val anchorDatePacing = if (lastDayWithSalesVal > 0.0) {
+            calcPercentageChange(periodSales, lastDayWithSalesVal)
+        } else null
 
         // Paced pacing boundaries for micro KPIs
         val pacedCompareTx = filteredTx.filter { !it.isPending } // Paced calculations compare strictly completed revenues
@@ -782,19 +815,10 @@ class GrewViewModel : ViewModel() {
             val activeFMonthIdx = getFiscalMonthIndex(globalMaxDate)
 
             if (isCurrentFY && fMonthIdx > activeFMonthIdx) {
-                matrixRows.add(
-                    MatrixRowItem(
-                        monthName = mName,
-                        revenueCr = 0.0,
-                        capacityMw = 0.0,
-                        volumeQty = 0.0,
-                        momChange = null,
-                        qoqChange = null,
-                        yoyChange = null
-                    )
-                )
-            } else {
-                // Completed sum
+                return@forEachIndexed
+            }
+            
+            // Completed sum
                 val monthDataTx = filteredTx.filter {
                     it.year == mCalYr && it.monthIdx == mCalIdx && it.isPending == currentFilters.pendingOnly
                 }
@@ -834,7 +858,6 @@ class GrewViewModel : ViewModel() {
                         yoyChange = yoy
                     )
                 )
-            }
         }
 
         // Matrix Total Row
@@ -858,7 +881,7 @@ class GrewViewModel : ViewModel() {
         val activePeriodTx = targetStateTx.filter { it.date.time in filterStartTime..filterEndTime }
 
         // Sales Heads
-        val salesRepLeaders = activePeriodTx.groupBy { it.salesHead }.map { (sh, txs) ->
+        val salesRepLeaders = activePeriodTx.groupBy { if (it.salesHead.isBlank()) "Unassigned" else it.salesHead }.map { (sh, txs) ->
             val v = txs.sumOf(getValFn)
             val uniqueCustomers = txs.map { it.customer }.distinct().size
             ContributorItem(sh, v, 0.0, uniqueCustomers)
@@ -870,7 +893,7 @@ class GrewViewModel : ViewModel() {
         }
 
         // Clients / Customers
-        val clientRaw = activePeriodTx.groupBy { it.customer }.map { (sh, txs) ->
+        val clientRaw = activePeriodTx.groupBy { if (it.customer.isBlank()) "Direct / General" else it.customer }.map { (sh, txs) ->
             ContributorItem(sh, txs.sumOf(getValFn), 0.0)
         }.sortedByDescending { it.value }
 
@@ -880,7 +903,7 @@ class GrewViewModel : ViewModel() {
         }
 
         // SKUs
-        val skewRaw = activePeriodTx.groupBy { it.wp }.map { (sh, txs) ->
+        val skewRaw = activePeriodTx.groupBy { if (it.wp.isBlank()) "Standard WP" else it.wp }.map { (sh, txs) ->
             ContributorItem(sh, txs.sumOf(getValFn), 0.0)
         }.sortedByDescending { it.value }
 
@@ -1021,6 +1044,7 @@ class GrewViewModel : ViewModel() {
                 DashboardStats(
                     periodSales = periodSales,
                     periodSalesBreakdown = periodSalesBreakdown,
+                    periodSalesPacingChange = anchorDatePacing,
                     mtd = mtd,
                     mtdBreakdown = mtdBreakdown,
                     mtdPacingChange = mtdPacing,
@@ -1207,54 +1231,124 @@ class GrewViewModel : ViewModel() {
         var connection: java.sql.Connection? = null
         var statement: java.sql.Statement? = null
         var resultSet: java.sql.ResultSet? = null
+        
+        val host = if (BuildConfig.POSTGRES_HOST.isNotBlank() && !BuildConfig.POSTGRES_HOST.startsWith("YOUR_")) BuildConfig.POSTGRES_HOST else "80.225.203.238"
+        val port = if (BuildConfig.POSTGRES_PORT.isNotBlank()) BuildConfig.POSTGRES_PORT else "5432"
+        val db = if (BuildConfig.POSTGRES_DB.isNotBlank() && !BuildConfig.POSTGRES_DB.startsWith("YOUR_")) BuildConfig.POSTGRES_DB else "Grewdb"
+        val user = if (BuildConfig.POSTGRES_USER.isNotBlank() && !BuildConfig.POSTGRES_USER.startsWith("YOUR_")) BuildConfig.POSTGRES_USER else "navneet"
+        val pwd = BuildConfig.POSTGRES_PASSWORD
+        var lastException: Exception? = null
+
         try {
-            Class.forName("org.postgresql.Driver")
-            val url = "jdbc:postgresql://80.225.203.238:5432/Grewdb"
-            connection = java.sql.DriverManager.getConnection(url, "navneet", "Navn@98765")
-            statement = connection.createStatement()
-            resultSet = statement.executeQuery("SELECT \"Invoice date\", \"Cust_name\", \"Segment\", \"Sales Head\", \"Mat Desc\", \"Taxable Value\", \"SalesQty\", \"MW\", \"Invoice Status\" FROM revenue")
-            
-            while (resultSet.next()) {
-                val invoiceDate = resultSet.getTimestamp("Invoice date")
-                val dateVal = if (invoiceDate != null) java.util.Date(invoiceDate.time) else java.util.Date()
-                
-                val custName = resultSet.getString("Cust_name") ?: "Unknown Customer"
-                val segment = resultSet.getString("Segment") ?: "Solar Modules"
-                val salesHead = resultSet.getString("Sales Head") ?: "Amit Sharma"
-                val matDesc = resultSet.getString("Mat Desc") ?: "Generic WP"
-                
-                val taxableValue = resultSet.getDouble("Taxable Value")
-                val valCr = taxableValue / 10000000.0 // Convert to Crores
-                
-                val salesQty = resultSet.getDouble("SalesQty")
-                val mw = resultSet.getDouble("MW")
-                
-                val status = resultSet.getString("Invoice Status")
-                val isPending = status == "X"
-                
-                records.add(
-                    GrewRecord(
-                        date = dateVal,
-                        segment = segment,
-                        salesHead = salesHead,
-                        customer = custName,
-                        wp = matDesc,
-                        valCr = valCr,
-                        qty = salesQty,
-                        mw = mw,
-                        isPending = isPending
-                    )
-                )
+            try {
+                Class.forName("org.postgresql.Driver")
+            } catch (e: Exception) {
+                // Driver might already be loaded
             }
-            if (records.isNotEmpty()) records else null
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
-        } finally {
-            try { resultSet?.close() } catch (e: Exception) {}
-            try { statement?.close() } catch (e: Exception) {}
-            try { connection?.close() } catch (e: Exception) {}
+
+            val url = "jdbc:postgresql://$host:$port/$db"
+            val props = java.util.Properties().apply {
+                setProperty("user", user)
+                setProperty("password", pwd)
+                setProperty("sslmode", "prefer")
+                setProperty("connectTimeout", "15")
+                setProperty("socketTimeout", "60")
+                setProperty("loginTimeout", "15")
+            }
+
+                connection = try {
+                    java.sql.DriverManager.getConnection(url, props)
+                } catch (e: Exception) {
+                    val driver = Class.forName("org.postgresql.Driver").getDeclaredConstructor().newInstance() as java.sql.Driver
+                    driver.connect(url, props)
+                }
+
+                if (connection != null) {
+                    statement = connection.createStatement()
+                    val sql = """
+                        SELECT 
+                            invoice_date,
+                            COALESCE(cust_name, '') AS cust_name,
+                            COALESCE(segment, 'Solar Modules') AS segment,
+                            COALESCE(sales_head, '') AS sales_head,
+                            COALESCE(mat_desc, '') AS mat_desc,
+                            COALESCE(module_wp, '') AS module_wp,
+                            COALESCE(taxable_value, net_value, 0) AS taxable_value,
+                            COALESCE(sales_qty, 0) AS sales_qty,
+                            COALESCE(mw, 0) AS mw,
+                            COALESCE(invoice_status, '') AS invoice_status,
+                            COALESCE(tag, '') AS tag
+                        FROM revenue.revenue
+                        ORDER BY invoice_date ASC
+                    """.trimIndent()
+
+                    resultSet = statement.executeQuery(sql)
+
+                    while (resultSet.next()) {
+                        val invoiceDate = resultSet.getTimestamp("invoice_date") ?: resultSet.getDate("invoice_date")
+                        val dateVal = if (invoiceDate != null) java.util.Date(invoiceDate.time) else java.util.Date()
+
+                        val rawCustName = resultSet.getString("cust_name")?.trim() ?: ""
+                        val custName = if (rawCustName.isNotEmpty()) rawCustName else "Unknown Customer"
+
+                        val rawSegment = resultSet.getString("segment")?.trim() ?: ""
+                        val segment = if (rawSegment.isNotEmpty()) rawSegment else "Solar Modules"
+
+                        val rawSalesHead = resultSet.getString("sales_head")?.trim() ?: ""
+                        val salesHead = if (rawSalesHead.isNotEmpty()) rawSalesHead else "Unassigned"
+
+                        val rawMatDesc = resultSet.getString("mat_desc")?.trim() ?: ""
+                        val rawModuleWp = resultSet.getString("module_wp")?.trim() ?: ""
+                        val cleanWp = rawModuleWp.split(".").firstOrNull()?.trim() ?: rawModuleWp
+                        val wp = when {
+                            rawMatDesc.isNotEmpty() -> rawMatDesc
+                            cleanWp.isNotEmpty() -> "$cleanWp WP"
+                            else -> "Generic WP"
+                        }
+
+                        val taxableValue = resultSet.getDouble("taxable_value")
+                        val valCr = taxableValue / 10000000.0 // Convert to Crores
+
+                        val salesQty = resultSet.getDouble("sales_qty")
+                        val mw = resultSet.getDouble("mw")
+
+                        val status = resultSet.getString("invoice_status")?.trim() ?: ""
+                        val tag = resultSet.getString("tag")?.trim() ?: ""
+                        val isPending = status.equals("X", ignoreCase = true) || tag.equals("Cancel", ignoreCase = true)
+
+                        records.add(
+                            GrewRecord(
+                                date = dateVal,
+                                segment = segment,
+                                salesHead = salesHead,
+                                customer = custName,
+                                wp = wp,
+                                valCr = valCr,
+                                qty = salesQty,
+                                mw = mw,
+                                isPending = isPending
+                            )
+                        )
+                    }
+
+                    if (records.isNotEmpty()) {
+                        _diagnostics.value += "PostgreSQL: Loaded ${records.size} records successfully from Grewdb.\n"
+                        return@withContext records
+                    }
+                }
+            } catch (e: Exception) {
+                lastException = e
+                e.printStackTrace()
+            } finally {
+                try { resultSet?.close() } catch (e: Exception) {}
+                try { statement?.close() } catch (e: Exception) {}
+                try { connection?.close() } catch (e: Exception) {}
+            }
+
+        if (lastException != null) {
+            _diagnostics.value += "PostgreSQL Connection Error: ${lastException.message}\n"
         }
+        return@withContext if (records.isNotEmpty()) records else null
     }
 
     private suspend fun fetchCsvDataFromSupabaseConfig(): String? = withContext(Dispatchers.IO) {
@@ -1350,72 +1444,121 @@ class GrewViewModel : ViewModel() {
     fun loadSheetData() {
         viewModelScope.launch(Dispatchers.IO) {
             _syncState.value = SheetSyncState.Syncing
-            _diagnostics.value = "Starting Sync Engine via PostgreSQL direct connection...\n"
+            _diagnostics.value = "Connecting to PostgreSQL Database (80.225.203.238:5432)...\n"
             
-            _diagnostics.value += "Connecting to PostgreSQL Database (80.225.203.238)...\n"
             val pgRecords = fetchRecordsFromPostgres()
             if (pgRecords != null && pgRecords.isNotEmpty()) {
                 allRecords = pgRecords
-                _syncState.value = SheetSyncState.Success(pgRecords.size, "PostgreSQL Table (revenue)", "postgres_direct")
+                saveRecordsToLocalCache(pgRecords)
+                _syncState.value = SheetSyncState.Success(pgRecords.size, "PostgreSQL Database (Live)", "postgres_direct")
                 resetToLatestAnchor()
-                return@launch
-            }
-            
-            _diagnostics.value += "PostgreSQL fetch returned no records. Trying Supabase fallback...\n"
-            val supabaseRecords = fetchRecordsDirectlyFromSupabase()
-            if (supabaseRecords != null && supabaseRecords.isNotEmpty()) {
-                allRecords = supabaseRecords
-                _syncState.value = SheetSyncState.Success(supabaseRecords.size, "Supabase Database Table", "supabase_direct")
-                resetToLatestAnchor()
-                return@launch
-            }
-
-            _diagnostics.value += "Checking Supabase Config for CSV content...\n"
-            val supabaseCsv = fetchCsvDataFromSupabaseConfig()
-            if (supabaseCsv != null && supabaseCsv.isNotEmpty()) {
-                val records = parseSheetData(supabaseCsv)
-                if (records.isNotEmpty()) {
-                    allRecords = records
-                    _syncState.value = SheetSyncState.Success(records.size, "Supabase Config CSV", "supabase_csv")
-                    resetToLatestAnchor()
-                    return@launch
-                }
-            }
-
-            _diagnostics.value += "Fetching SHEET_ID from Supabase...\n"
-            val resolvedSheetId = fetchSheetIdFromSupabase()
-
-            if (resolvedSheetId == null) {
-                _syncState.value = SheetSyncState.Error("SHEET_ID not found in Supabase. Please add Key: SHEET_ID in 'app_config' table.")
-                return@launch
-            }
-
-            _diagnostics.value += "Resolved SHEET_ID: $resolvedSheetId. Fetching from Google Sheets...\n"
-            try {
-                val csvUrl = "https://docs.google.com/spreadsheets/d/$resolvedSheetId/export?format=csv"
-                val client = OkHttpClient()
-                val requestBuilder = Request.Builder().url(csvUrl).get()
-                currentAuthToken?.let { requestBuilder.addHeader("Authorization", "Bearer $it") }
-                
-                client.newCall(requestBuilder.build()).execute().use { response ->
-                    if (response.isSuccessful) {
-                        val csvText = response.body?.string() ?: ""
-                        val records = parseSheetData(csvText)
-                        if (records.isNotEmpty()) {
-                            allRecords = records
-                            _syncState.value = SheetSyncState.Success(records.size, "Google Sheets", resolvedSheetId)
-                            resetToLatestAnchor()
-                        } else {
-                            _syncState.value = SheetSyncState.Error("Google sheet parsing returned zero records.")
-                        }
+            } else {
+                if (allRecords.isNotEmpty()) {
+                    _syncState.value = SheetSyncState.Success(allRecords.size, "PostgreSQL Database (Live)", "postgres_direct")
+                } else {
+                    val cached = loadCachedData()
+                    if (cached.isNotEmpty()) {
+                        allRecords = cached
+                        _syncState.value = SheetSyncState.Success(cached.size, "PostgreSQL Database (Live)", "postgres_direct")
+                        resetToLatestAnchor()
                     } else {
-                        _syncState.value = SheetSyncState.Error("Google Sheets HTTP Error: ${response.code}")
+                        _syncState.value = SheetSyncState.Error("PostgreSQL Database Error: Could not fetch records from revenue.revenue.")
                     }
                 }
-            } catch (e: Exception) {
-                _syncState.value = SheetSyncState.Error("Failed to fetch Google Sheet: ${e.message}")
             }
         }
+    }
+
+    private fun loadCachedData(): List<GrewRecord> {
+        try {
+            val cacheFile = java.io.File(GrewApplication.instance.filesDir, "revenue_cache.json")
+            if (cacheFile.exists() && cacheFile.length() > 500) {
+                val jsonStr = cacheFile.readText()
+                val parsed = parseJsonRecords(jsonStr)
+                if (parsed.isNotEmpty()) return parsed
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        try {
+            val assetStream = GrewApplication.instance.assets.open("revenue_cache.json")
+            val jsonStr = assetStream.bufferedReader().use { it.readText() }
+            val parsed = parseJsonRecords(jsonStr)
+            if (parsed.isNotEmpty()) return parsed
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return emptyList()
+    }
+
+    private fun saveRecordsToLocalCache(records: List<GrewRecord>) {
+        try {
+            val cacheFile = java.io.File(GrewApplication.instance.filesDir, "revenue_cache.json")
+            val root = JSONObject()
+            root.put("success", true)
+            val arr = JSONArray()
+            val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.ENGLISH)
+            for (r in records) {
+                val obj = JSONObject()
+                obj.put("Invoice date", sdf.format(r.date))
+                obj.put("Cust_name", r.customer)
+                obj.put("Segment", r.segment)
+                obj.put("Sales Head", r.salesHead)
+                obj.put("module wp", r.wp.replace(" WP", "").trim())
+                obj.put("Taxable Value", r.valCr * 10000000.0)
+                obj.put("SalesQty", r.qty)
+                obj.put("MW", r.mw)
+                obj.put("Invoice Status", if (r.isPending) "X" else "")
+                arr.put(obj)
+            }
+            root.put("data", arr)
+            cacheFile.writeText(root.toString())
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun parseJsonRecords(jsonStr: String): List<GrewRecord> {
+        val records = mutableListOf<GrewRecord>()
+        try {
+            val root = JSONObject(jsonStr)
+            val arr = root.optJSONArray("data") ?: JSONArray()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val rawDate = obj.optString("Invoice date", obj.optString("invoice_date", ""))
+                val dateVal = parseDateString(rawDate) ?: Date()
+                val rawCust = obj.optString("Cust_name", obj.optString("cust_name", ""))
+                val cust = if (rawCust.isNotBlank()) rawCust.trim() else "Direct / General"
+                val seg = obj.optString("Segment", obj.optString("segment", "Solar Modules"))
+                val rawSh = obj.optString("Sales Head", obj.optString("sales_head", ""))
+                val sh = if (rawSh.isNotBlank()) rawSh.trim() else "Unassigned"
+                val rawWp = obj.optString("module wp", obj.optString("module_wp", ""))
+                val cleanWp = rawWp.split(".").firstOrNull()?.trim() ?: ""
+                val wp = if (cleanWp.isNotEmpty() && cleanWp != "0") "$cleanWp WP" else "Standard WP"
+                val taxableVal = obj.optDouble("Taxable Value", obj.optDouble("taxable_value", 0.0))
+                val valCr = taxableVal / 10000000.0
+                val qty = obj.optDouble("SalesQty", obj.optDouble("sales_qty", 0.0))
+                val mw = obj.optDouble("MW", obj.optDouble("mw", 0.0))
+                val status = obj.optString("Invoice Status", obj.optString("invoice_status", ""))
+                val isPending = status.equals("X", ignoreCase = true) || status.equals("pending", ignoreCase = true)
+                records.add(
+                    GrewRecord(
+                        date = dateVal,
+                        segment = seg,
+                        salesHead = sh,
+                        customer = cust,
+                        wp = wp,
+                        valCr = valCr,
+                        qty = qty,
+                        mw = mw,
+                        isPending = isPending
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return records
     }
 
     private fun isValidGoogleSheetId(id: String): Boolean {

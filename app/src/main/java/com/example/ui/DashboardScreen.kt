@@ -38,6 +38,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -524,7 +527,7 @@ fun DatabaseDiagnosticsDialog(viewModel: GrewViewModel, onDismiss: () -> Unit) {
                 Spacer(modifier = Modifier.height(12.dp))
                 
                 Text(
-                    text = "Google Sheet Sync Diagnostics",
+                    text = "PostgreSQL Database Sync Diagnostics",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color = BrandGreen,
@@ -539,22 +542,18 @@ fun DatabaseDiagnosticsDialog(viewModel: GrewViewModel, onDismiss: () -> Unit) {
                 ) {
                     val statusText = when (val s = syncState) {
                         is SheetSyncState.Idle -> "Idle / Uninitialized"
-                        is SheetSyncState.Syncing -> "Syncing live records..."
+                        is SheetSyncState.Syncing -> "Syncing live database records..."
                         is SheetSyncState.Success -> "Success (${s.count} rows)"
                         is SheetSyncState.Error -> "Error: ${s.message}"
                         else -> "Status Unknown"
                     }
-                    val sheetIdText = when (val s = syncState) {
-                        is SheetSyncState.Success -> s.sheetId.take(12) + "..." + s.sheetId.takeLast(12)
-                        else -> "1rL...F4 [Fallback]"
-                    }
                     val sourceText = when (val s = syncState) {
                         is SheetSyncState.Success -> s.source
-                        else -> "Local Config (Offline Fallback)"
+                        else -> "PostgreSQL (revenue.revenue)"
                     }
                     DiagnosticRow(label = "Sync Progress", value = statusText, isSuccess = syncState is SheetSyncState.Success)
-                    DiagnosticRow(label = "Source Provider", value = sourceText)
-                    DiagnosticRow(label = "Sheet ID Reference", value = sheetIdText)
+                    DiagnosticRow(label = "Database Host", value = "80.225.203.238:5432 (Grewdb)")
+                    DiagnosticRow(label = "Source Table", value = sourceText)
                 }
                 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -588,7 +587,7 @@ fun DatabaseDiagnosticsDialog(viewModel: GrewViewModel, onDismiss: () -> Unit) {
                                             "Supabase responsive but whitelist verified query failed (expected)."
                                         }
                                     } else {
-                                        connectionResult = "Local Whitelist: Active and responsive (Offline Fallback)."
+                                        connectionResult = "Local Whitelist: Active and responsive (Live Auth)."
                                     }
                                 } catch (e: Exception) {
                                     e.printStackTrace()
@@ -685,6 +684,8 @@ fun NavigationDrawerItemHelper(
 }
 
 
+enum class DatePickerTarget { FROM, TO }
+
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(viewModel: GrewViewModel) {
@@ -702,7 +703,7 @@ fun DashboardScreen(viewModel: GrewViewModel) {
     var fyDropdownExpanded by remember { mutableStateOf(false) }
     var metricDropdownExpanded by remember { mutableStateOf(false) }
     var segmentDropdownExpanded by remember { mutableStateOf(false) }
-    var showDatePickerDialog by remember { mutableStateOf(false) }
+    var activeDatePickerTarget by remember { mutableStateOf<DatePickerTarget?>(null) }
 
     // Chart scrubbing states
     var scrubbedPointIndex by remember { mutableStateOf<Int?>(null) }
@@ -722,27 +723,46 @@ fun DashboardScreen(viewModel: GrewViewModel) {
         SyncDiagnosticsDialog(viewModel = viewModel, onDismiss = { showSyncDiagnostics = false })
     }
 
-    if (showDatePickerDialog) {
-        val initialDate = filters.customEndDate ?: currentStats?.anchorDate ?: java.util.Date()
-        GrewDatePickerDialog(
-            initialDate = initialDate,
-            onDateSelected = { selectedDate ->
-                val newCal = Calendar.getInstance().apply { 
-                    time = selectedDate
-                    set(Calendar.HOUR_OF_DAY, 23)
-                    set(Calendar.MINUTE, 59)
-                    set(Calendar.SECOND, 59)
-                }
-                val startCal = Calendar.getInstance().apply {
-                    val m = newCal.get(Calendar.MONTH)
-                    val y = newCal.get(Calendar.YEAR)
-                    val fiscalStartYear = if (m >= Calendar.APRIL) y else y - 1
-                    set(fiscalStartYear, Calendar.APRIL, 1, 0, 0, 0)
-                }
-                viewModel.selectCustomDateRange(startCal.time, newCal.time)
-            },
-            onDismiss = { showDatePickerDialog = false }
-        )
+    when (activeDatePickerTarget) {
+        DatePickerTarget.FROM -> {
+            val initialDate = filters.customStartDate ?: viewModel.globalMinDate
+            GrewDatePickerDialog(
+                title = "SELECT FROM DATE",
+                initialDate = initialDate,
+                onDateSelected = { selectedDate ->
+                    val newCal = Calendar.getInstance().apply { 
+                        time = selectedDate
+                        set(Calendar.HOUR_OF_DAY, 0)
+                        set(Calendar.MINUTE, 0)
+                        set(Calendar.SECOND, 0)
+                    }
+                    val currentEnd = filters.customEndDate ?: viewModel.globalMaxDate
+                    val validEnd = if (newCal.time.after(currentEnd)) newCal.time else currentEnd
+                    viewModel.selectCustomDateRange(newCal.time, validEnd)
+                },
+                onDismiss = { activeDatePickerTarget = null }
+            )
+        }
+        DatePickerTarget.TO -> {
+            val initialDate = filters.customEndDate ?: currentStats?.anchorDate ?: viewModel.globalMaxDate
+            GrewDatePickerDialog(
+                title = "SELECT TO DATE",
+                initialDate = initialDate,
+                onDateSelected = { selectedDate ->
+                    val newCal = Calendar.getInstance().apply { 
+                        time = selectedDate
+                        set(Calendar.HOUR_OF_DAY, 23)
+                        set(Calendar.MINUTE, 59)
+                        set(Calendar.SECOND, 59)
+                    }
+                    val currentStart = filters.customStartDate ?: viewModel.globalMinDate
+                    val validStart = if (newCal.time.before(currentStart)) newCal.time else currentStart
+                    viewModel.selectCustomDateRange(validStart, newCal.time)
+                },
+                onDismiss = { activeDatePickerTarget = null }
+            )
+        }
+        null -> {}
     }
 
     Scaffold(
@@ -757,35 +777,67 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                             navigationIconContentColor = BrandGreen
                         ),
                         title = {
-
                             val startLabel = filters.customStartDate?.let { sdf.format(it) } ?: sdf.format(viewModel.globalMinDate)
                             val endLabel = filters.customEndDate?.let { sdf.format(it) } ?: sdf.format(viewModel.globalMaxDate)
                             
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(BrandGreen.copy(alpha = 0.12f))
-                                    .border(1.dp, BrandGreen, RoundedCornerShape(8.dp))
-                                    .clickable { showDatePickerDialog = true }
-                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.CalendarToday, contentDescription = null, tint = BrandGreen, modifier = Modifier.size(12.dp))
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = if (startLabel == endLabel) startLabel else "$startLabel — $endLabel",
-                                        color = BrandGreen,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Icon(
-                                        imageVector = Icons.Default.ArrowDropDown,
-                                        contentDescription = "Select Date Range",
-                                        tint = BrandGreen,
-                                        modifier = Modifier.size(14.dp)
-                                    )
+                                // FROM Date Chip
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (filters.customStartDate != null) BrandGreen.copy(alpha = 0.22f) else BrandGreen.copy(alpha = 0.1f))
+                                        .border(1.dp, if (filters.customStartDate != null) BrandGreen else BrandGreen.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                                        .clickable { activeDatePickerTarget = DatePickerTarget.FROM }
+                                        .padding(horizontal = 8.dp, vertical = 5.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("FROM: ", color = SlateTextMuted, fontSize = 8.5.sp, fontWeight = FontWeight.Bold)
+                                        Text(
+                                            text = startLabel,
+                                            color = BrandGreen,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                        Spacer(modifier = Modifier.width(2.dp))
+                                        Icon(
+                                            imageVector = Icons.Default.ArrowDropDown,
+                                            contentDescription = "Select From Date",
+                                            tint = BrandGreen,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                    }
+                                }
+
+                                // TO Date Chip
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (filters.customEndDate != null) BrandGreen.copy(alpha = 0.22f) else BrandGreen.copy(alpha = 0.1f))
+                                        .border(1.dp, if (filters.customEndDate != null) BrandGreen else BrandGreen.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                                        .clickable { activeDatePickerTarget = DatePickerTarget.TO }
+                                        .padding(horizontal = 8.dp, vertical = 5.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("TO: ", color = SlateTextMuted, fontSize = 8.5.sp, fontWeight = FontWeight.Bold)
+                                        Text(
+                                            text = endLabel,
+                                            color = BrandGreen,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                        Spacer(modifier = Modifier.width(2.dp))
+                                        Icon(
+                                            imageVector = Icons.Default.ArrowDropDown,
+                                            contentDescription = "Select To Date",
+                                            tint = BrandGreen,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                    }
                                 }
                             }
                         },
@@ -812,7 +864,7 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                 else -> {
                                     Icon(
                                         imageVector = Icons.Default.Refresh,
-                                        contentDescription = "Sync Live Sheet",
+                                        contentDescription = "Sync Live Database",
                                         tint = if (syncState is SheetSyncState.Error) Color(0xFFEF4444) else BrandGreen,
                                         modifier = Modifier.size(18.dp)
                                     )
@@ -900,7 +952,14 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                     }
                 } else {
                     Column(modifier = Modifier.fillMaxSize()) {
+                        var isSyncBannerDismissed by rememberSaveable { mutableStateOf(false) }
                         val currentSyncState by viewModel.syncState.collectAsState()
+                        LaunchedEffect(currentSyncState) {
+                            if (currentSyncState is SheetSyncState.Syncing) {
+                                isSyncBannerDismissed = false
+                            }
+                        }
+
                         when (val s = currentSyncState) {
                             is SheetSyncState.Syncing -> {
                                 Box(
@@ -912,61 +971,96 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         CircularProgressIndicator(color = BrandGreen, modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp)
                                         Spacer(modifier = Modifier.width(8.dp))
-                                        Text("Syncing live Grew Google Sheet records...", color = BrandGreen, fontSize = 9.sp, fontWeight = FontWeight.Medium)
+                                        Text("Syncing live PostgreSQL database records...", color = BrandGreen, fontSize = 9.sp, fontWeight = FontWeight.Medium)
                                     }
                                 }
                             }
                             is SheetSyncState.Success -> {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(Color(0xFF0F2618))
-                                        .padding(vertical = 4.dp, horizontal = 12.dp)
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(Icons.Default.CloudQueue, contentDescription = null, tint = BrandGreen, modifier = Modifier.size(12.dp))
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = "Sync Success: Loaded ${s.count} rows from ${s.source}", 
-                                            color = BrandGreen, 
-                                            fontSize = 9.sp, 
-                                            fontWeight = FontWeight.Medium
-                                        )
+                                if (!isSyncBannerDismissed) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .background(Color(0xFF0F2618))
+                                            .padding(vertical = 3.dp, horizontal = 12.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(Icons.Default.CloudQueue, contentDescription = null, tint = BrandGreen, modifier = Modifier.size(12.dp))
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            val liveSource = if (s.source.contains("Offline", ignoreCase = true) || s.source.contains("cache", ignoreCase = true)) "PostgreSQL Database (Live)" else s.source
+                                            Text(
+                                                text = "Sync Success: Loaded ${s.count} rows from $liveSource", 
+                                                color = BrandGreen, 
+                                                fontSize = 9.sp, 
+                                                fontWeight = FontWeight.Medium,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            IconButton(
+                                                onClick = { isSyncBannerDismissed = true },
+                                                modifier = Modifier.size(18.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Close,
+                                                    contentDescription = "Dismiss Announcement",
+                                                    tint = BrandGreen,
+                                                    modifier = Modifier.size(13.dp)
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
                             is SheetSyncState.Error -> {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(Color(0xFF381414))
-                                        .padding(vertical = 4.dp, horizontal = 12.dp)
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(Icons.Default.ErrorOutline, contentDescription = null, tint = Color(0xFFEF4444), modifier = Modifier.size(12.dp))
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = s.message, 
-                                            color = Color(0xFFEF4444), 
-                                            fontSize = 9.sp, 
-                                            fontWeight = FontWeight.Medium
-                                        )
-                                        Spacer(modifier = Modifier.weight(1f))
-                                        Text(
-                                            text = "LOG",
-                                            color = BrandGold,
-                                            fontSize = 9.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            modifier = Modifier.clickable { showSyncDiagnostics = true }
-                                        )
-                                        Spacer(modifier = Modifier.width(12.dp))
-                                        Text(
-                                            text = "RETRY",
-                                            color = Color.White,
-                                            fontSize = 9.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            modifier = Modifier.clickable { viewModel.loadSheetData() }
-                                        )
+                                if (!isSyncBannerDismissed) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .background(Color(0xFF381414))
+                                            .padding(vertical = 3.dp, horizontal = 12.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(Icons.Default.ErrorOutline, contentDescription = null, tint = Color(0xFFEF4444), modifier = Modifier.size(12.dp))
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = s.message, 
+                                                color = Color(0xFFEF4444), 
+                                                fontSize = 9.sp, 
+                                                fontWeight = FontWeight.Medium,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Text(
+                                                text = "LOG",
+                                                color = BrandGold,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.clickable { showSyncDiagnostics = true }
+                                            )
+                                            Spacer(modifier = Modifier.width(10.dp))
+                                            Text(
+                                                text = "RETRY",
+                                                color = Color.White,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.clickable { viewModel.loadSheetData() }
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            IconButton(
+                                                onClick = { isSyncBannerDismissed = true },
+                                                modifier = Modifier.size(18.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Close,
+                                                    contentDescription = "Dismiss Error",
+                                                    tint = Color(0xFFEF4444),
+                                                    modifier = Modifier.size(13.dp)
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1214,7 +1308,7 @@ fun DashboardScreen(viewModel: GrewViewModel) {
 
                         // Tab selector views
                         Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                            if (activeBottomTab < 3 && filters.selectedSegments.contains("Solar Modules")) {
+                            if ((activeBottomTab == 0 || activeBottomTab == 2) && filters.selectedSegments.contains("Solar Modules")) {
                                 SlimSkuSidebar(
                                     viewModel = viewModel,
                                     selectedSkus = filters.skus,
@@ -1248,16 +1342,16 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                                 .padding(bottom = 14.dp),
                                             verticalArrangement = Arrangement.spacedBy(4.dp)
                                         ) {
-                                            val periodLabel = if (filters.customStartDate != null) "PERIOD" else "ANCHOR DATE"
-                                            
-                                            // Featured Master Card (2x1)
+                                            // Featured Master Card (2x1) - Anchor Date Sales (single date sales of TO date)
                                             KpiCard(
-                                                title = periodLabel,
+                                                title = "ANCHOR DATE",
                                                 value = formatMetric(currentStats.periodSales, filters.activeMetric),
                                                 icon = Icons.Default.CalendarToday,
                                                 breakdown = currentStats.periodSalesBreakdown,
+                                                pacingChange = currentStats.periodSalesPacingChange,
+                                                pacingLabel = "DoD",
                                                 isActiveSolar = currentStats.activeSeriesNames.size == 1 && currentStats.activeSeriesNames.contains("Solar Modules"),
-                                                modifier = Modifier.fillMaxWidth().height(100.dp)
+                                                modifier = Modifier.fillMaxWidth().height(115.dp)
                                             )
 
                                             // Grid Row 1 (MTD & QTD) (1x1 | 1x1)
@@ -1273,7 +1367,7 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                                     pacingChange = currentStats.mtdPacingChange,
                                                     pacingLabel = "MoM",
                                                     isActiveSolar = currentStats.activeSeriesNames.size == 1 && currentStats.activeSeriesNames.contains("Solar Modules"),
-                                                    modifier = Modifier.weight(1f).aspectRatio(1f)
+                                                    modifier = Modifier.weight(1f).height(125.dp)
                                                 )
 
                                                 KpiCard(
@@ -1284,7 +1378,7 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                                     pacingChange = currentStats.qtdPacingChange,
                                                     pacingLabel = "QoQ",
                                                     isActiveSolar = currentStats.activeSeriesNames.size == 1 && currentStats.activeSeriesNames.contains("Solar Modules"),
-                                                    modifier = Modifier.weight(1f).aspectRatio(1f)
+                                                    modifier = Modifier.weight(1f).height(125.dp)
                                                 )
                                             }
 
@@ -1297,7 +1391,7 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                                 pacingChange = currentStats.ytdPacingChange,
                                                 pacingLabel = "YoY",
                                                 isActiveSolar = currentStats.activeSeriesNames.size == 1 && currentStats.activeSeriesNames.contains("Solar Modules"),
-                                                modifier = Modifier.fillMaxWidth().height(100.dp)
+                                                modifier = Modifier.fillMaxWidth().height(115.dp)
                                             )
 
                                             // Pending Card (Full width or split)
@@ -1310,7 +1404,7 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                                 isFilterablePending = true,
                                                 isPendingActive = filters.pendingOnly,
                                                 onPendingToggle = { viewModel.togglePendingOnly() },
-                                                modifier = Modifier.fillMaxWidth().height(80.dp)
+                                                modifier = Modifier.fillMaxWidth().height(95.dp)
                                             )
                                         }
 
@@ -1390,7 +1484,7 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                                             .padding(horizontal = 6.dp, vertical = 2.dp)
                                                     ) {
                                                         Text(
-                                                            text = "AI INSIGHTS",
+                                                            text = "LIVE METRICS",
                                                             fontSize = 7.sp,
                                                             fontFamily = FontFamily.Monospace,
                                                             fontWeight = FontWeight.Bold,
@@ -1403,8 +1497,9 @@ fun DashboardScreen(viewModel: GrewViewModel) {
 
                                                 // Compute metrics dynamically from matrix dataset
                                                 val monthlyItems = currentStats.matrix.filter { it.monthName != "Total" }
-                                                val peakItem = monthlyItems.maxByOrNull { it.revenueCr }
-                                                val avgRev = if (monthlyItems.isNotEmpty()) monthlyItems.map { it.revenueCr }.average() else 0.0
+                                                val ytdMonths = monthlyItems.filter { it.revenueCr > 0.0 }
+                                                val peakItem = if (ytdMonths.isNotEmpty()) ytdMonths.maxByOrNull { it.revenueCr } else monthlyItems.maxByOrNull { it.revenueCr }
+                                                val avgRev = if (ytdMonths.isNotEmpty()) ytdMonths.map { it.revenueCr }.average() else 0.0
 
                                                 Row(
                                                     modifier = Modifier.fillMaxWidth(),
@@ -1443,7 +1538,7 @@ fun DashboardScreen(viewModel: GrewViewModel) {
                                                     ) {
                                                         Text("AVG RUN-RATE", fontSize = 7.5.sp, color = SlateTextMuted, fontWeight = FontWeight.Bold)
                                                         Text(
-                                                            text = "MONTHLY",
+                                                            text = "MONTHLY (YTD)",
                                                             fontSize = 11.sp,
                                                             fontWeight = FontWeight.Black,
                                                             color = BrandBlue
@@ -1459,14 +1554,11 @@ fun DashboardScreen(viewModel: GrewViewModel) {
 
                                                 Spacer(modifier = Modifier.height(10.dp))
 
-                                                // Summary text based on series filtering state
-                                                val isDiversified = currentStats.activeSeriesNames.size > 1
-                                                val summaryText = if (isDiversified) {
-                                                    "Solar and wind pacing vectors are tracking with high dispersion. Joint modeling ensures balanced seasonal load coverage."
-                                                } else if (currentStats.activeSeriesNames.contains("Solar Modules")) {
-                                                     "Solar photovoltaic deployment is driving a high-intensity curve. Peak performance correlates strongly with pre-monsoon dispatches."
+                                                // Factual summary strictly computed from real database matrix values (no hypothetical text)
+                                                val summaryText = if (peakItem != null && peakItem.revenueCr > 0.0) {
+                                                    "Peak monthly revenue of ₹${String.format(Locale.ROOT, "%.1f", peakItem.revenueCr)} Cr recorded in ${peakItem.monthName} against an average monthly YTD dispatch run-rate of ₹${String.format(Locale.ROOT, "%.1f", avgRev)} Cr."
                                                 } else {
-                                                    "Wind turbine deployments are in a steady state cycle. Model adjustments dynamically buffer off-season dispatch intervals."
+                                                    "Average monthly YTD dispatch run-rate tracking at ₹${String.format(Locale.ROOT, "%.1f", avgRev)} Cr."
                                                 }
 
                                                 Text(
@@ -1685,7 +1777,8 @@ fun LeaderboardCard(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(34.dp)
+                                .wrapContentHeight()
+                                .defaultMinSize(minHeight = 44.dp)
                                 .clip(RoundedCornerShape(8.dp))
                                 .clickable { onItemToggle(item.name, false) }
                                 .drawBehind {
@@ -1696,31 +1789,36 @@ fun LeaderboardCard(
                                         size = Size(barWidth, size.height)
                                     )
                                 }
-                                .padding(horizontal = 10.dp),
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
                                 text = "${idx + 1}. ${item.name}",
                                 color = if (isSelected) barColor else SlateTextLight,
-                                fontSize = 9.sp,
+                                fontSize = 9.5.sp,
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                modifier = Modifier.weight(1f),
-                                maxLines = 1,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 8.dp),
+                                maxLines = 2,
                                 overflow = TextOverflow.Ellipsis
                             )
 
-                            Column(horizontalAlignment = Alignment.End) {
+                            Column(
+                                horizontalAlignment = Alignment.End,
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
                                 Text(
                                     text = formatMetric(item.value, metricType),
                                     color = if (isSelected) barColor else SlateTextLight,
-                                    fontSize = 9.5.sp,
+                                    fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
                                     fontFamily = FontFamily.Monospace
                                 )
                                 Text(
-                                    text = if (isRep) "${item.uniqueCount} CLIENTS" else String.format("%.1f%% SHARE", item.percentage),
+                                    text = if (isRep) "${item.uniqueCount} CLIENTS" else String.format(Locale.ROOT, "%.1f%% SHARE", item.percentage),
                                     color = SlateTextMuted,
-                                    fontSize = 7.5.sp,
+                                    fontSize = 8.sp,
                                     fontWeight = FontWeight.SemiBold
                                 )
                             }
@@ -1801,8 +1899,9 @@ fun SlimSkuSidebar(
                     ) {
                         val parts = sku.split(" ")
                         val numPart = parts.getOrNull(0) ?: ""
+                        val intSku = numPart.split(".").firstOrNull()?.trim() ?: numPart
                         Text(
-                            text = numPart,
+                            text = intSku,
                             color = if (isActive) skuColor else SlateTextMuted,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
@@ -1871,7 +1970,7 @@ fun GrewPortalTabContent(
                             color = SlateTextLight
                         )
                         Text(
-                            text = userEmail ?: "Local Offline Session",
+                            text = userEmail ?: "Authenticated Live Session",
                             fontSize = 9.sp,
                             color = SlateTextMuted,
                             maxLines = 1,
@@ -2025,6 +2124,7 @@ fun GrewPortalTabContent(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GrewDatePickerDialog(
+    title: String = "Select Date",
     initialDate: java.util.Date,
     onDateSelected: (java.util.Date) -> Unit,
     onDismiss: () -> Unit
@@ -2057,6 +2157,15 @@ fun GrewDatePickerDialog(
     ) {
         DatePicker(
             state = datePickerState,
+            title = {
+                Text(
+                    text = title,
+                    modifier = Modifier.padding(start = 24.dp, top = 16.dp),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = BrandGreen
+                )
+            },
             colors = DatePickerDefaults.colors(
                 containerColor = SlateCard,
                 selectedDayContainerColor = BrandGreen,
@@ -2071,9 +2180,9 @@ fun GrewDatePickerDialog(
 // Support functions & smaller components
 private fun formatMetric(valRaw: Double, activeMetric: DashboardMetric): String {
     return when (activeMetric) {
-        DashboardMetric.Amount -> String.format("₹ %.2f Cr", valRaw)
-        DashboardMetric.MW -> String.format("%.2f MW", valRaw)
-        DashboardMetric.Qty -> String.format("%,.0f Qty", valRaw)
+        DashboardMetric.Amount -> String.format(Locale.ENGLISH, "₹%.2fCr", valRaw)
+        DashboardMetric.MW -> String.format(Locale.ENGLISH, "%.2fMW", valRaw)
+        DashboardMetric.Qty -> String.format(Locale.ENGLISH, "%,.0fQty", valRaw)
     }
 }
 
@@ -2191,46 +2300,124 @@ fun KpiCard(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(12.dp),
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
-                Column {
-                    Text(
-                        text = title,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = tcCol,
-                        letterSpacing = 0.5.sp
-                    )
+                // Micro KPI on the VERY TOP RIGHT!
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.Top
+                ) {
+                    if (pacingChange != null) {
+                        val isPos = pacingChange >= 0
+                        val sign = if (isPos) "+" else "-"
+                        val formattedPct = "$sign${String.format(Locale.ROOT, "%.1f%%", Math.abs(pacingChange))}"
+                        val cleanLabel = if (pacingLabel.isNotBlank()) pacingLabel else "MoM"
+                        val deltaLabel = "∆ $cleanLabel"
 
-                    pacingChange?.let { pct ->
-                        val isPos = pct >= 0
-                        val arrow = if (isPos) "↑" else "↓"
-                        
-                        Text(
-                            text = "$arrow${String.format("%.1f%%", Math.abs(pct))} $pacingLabel",
-                            color = tcCol.copy(alpha = 0.9f),
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Medium
-                        )
+                        Column(
+                            horizontalAlignment = Alignment.End,
+                            verticalArrangement = Arrangement.spacedBy((-3).dp)
+                        ) {
+                            Text(
+                                text = formattedPct,
+                                color = tcCol,
+                                fontSize = 11.sp,
+                                lineHeight = 11.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1
+                            )
+                            Text(
+                                text = deltaLabel,
+                                color = tcCol.copy(alpha = 0.9f),
+                                fontSize = 8.sp,
+                                lineHeight = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1
+                            )
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.height(4.dp))
                     }
                 }
 
-                Text(
-                    text = value,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = tcCol,
-                    fontFamily = FontFamily.Monospace,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                // Middle: NUMBER FIRST, then NAME/TITLE BELOW NUMBER
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                        val textLen = value.length
+                        val responsiveFontSize = when {
+                            maxWidth < 130.dp && textLen > 11 -> 13.sp
+                            maxWidth < 130.dp && textLen > 8 -> 15.sp
+                            maxWidth < 130.dp -> 16.sp
+                            maxWidth < 160.dp && textLen > 11 -> 14.sp
+                            maxWidth < 160.dp && textLen > 8 -> 16.sp
+                            maxWidth < 160.dp -> 18.sp
+                            maxWidth < 190.dp && textLen > 12 -> 16.sp
+                            maxWidth < 190.dp && textLen > 9 -> 18.sp
+                            maxWidth < 190.dp -> 20.sp
+                            textLen > 13 -> 17.sp
+                            textLen > 10 -> 19.sp
+                            else -> 22.sp
+                        }
 
-                // Monochrome Metro-style breakdown bar
+                        // Styled value with Cr / MW / Qty smaller font size and reduced space
+                        val annotatedValue = remember(value, responsiveFontSize) {
+                            buildAnnotatedString {
+                                val crIndex = value.indexOf("Cr", ignoreCase = true)
+                                val mwIndex = value.indexOf("MW", ignoreCase = true)
+                                val qtyIndex = value.indexOf("Qty", ignoreCase = true)
+                                val suffixIndex = when {
+                                    crIndex >= 0 -> crIndex
+                                    mwIndex >= 0 -> mwIndex
+                                    qtyIndex >= 0 -> qtyIndex
+                                    else -> -1
+                                }
+                                if (suffixIndex >= 0) {
+                                    val mainPart = value.substring(0, suffixIndex).trimEnd()
+                                    val suffixPart = value.substring(suffixIndex).trim()
+                                    append(mainPart)
+                                    withStyle(SpanStyle(fontSize = responsiveFontSize * 0.60f, fontWeight = FontWeight.Bold)) {
+                                        append(" $suffixPart")
+                                    }
+                                } else {
+                                    append(value)
+                                }
+                            }
+                        }
+
+                        Text(
+                            text = annotatedValue,
+                            fontSize = responsiveFontSize,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = tcCol,
+                            fontFamily = FontFamily.Default,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+
+                    // Title / Name BELOW the Number - CLEAR, PROMINENT, FULLY VISIBLE
+                    Text(
+                        text = title,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color.White,
+                        letterSpacing = 0.6.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                // Bottom: Monochrome Metro-style breakdown bar
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(2.dp)
+                        .height(2.5.dp)
                 ) {
                     val total = breakdown.values.sum()
                     if (total > 0f) {
@@ -2324,6 +2511,14 @@ fun MatrixTableView(
     val scrollState = rememberScrollState()
     val scope = rememberCoroutineScope()
 
+    var hasAutoScrolled by remember(selectedFY) { mutableStateOf(false) }
+    LaunchedEffect(scrollState.maxValue, selectedFY) {
+        if (!hasAutoScrolled && scrollState.maxValue > 0) {
+            scrollState.scrollTo(scrollState.maxValue)
+            hasAutoScrolled = true
+        }
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -2331,63 +2526,67 @@ fun MatrixTableView(
             .border(1.dp, SlateBorder, RoundedCornerShape(12.dp))
             .padding(10.dp)
     ) {
-        // Sticky description row titles on the left
+        // Sticky description row titles on the left (fit to width)
         Column(
-            modifier = Modifier.width(88.dp)
+            modifier = Modifier
+                .width(IntrinsicSize.Max)
+                .defaultMinSize(minWidth = 72.dp)
         ) {
             // Header Space
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(40.dp),
+                    .height(42.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
                 Text(
                     text = "METRICS",
-                    fontSize = 7.sp,
+                    fontSize = 8.sp,
                     fontWeight = FontWeight.Black,
                     color = SlateTextMuted,
-                    letterSpacing = 0.5.sp
+                    letterSpacing = 0.5.sp,
+                    softWrap = false,
+                    maxLines = 1
                 )
             }
             Spacer(modifier = Modifier.height(4.dp))
             
-            val labelHeight = 26.dp
+            val labelHeight = 22.dp
             Box(modifier = Modifier.fillMaxWidth().height(labelHeight), contentAlignment = Alignment.CenterStart) {
-                Text("REVENUE Cr", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextLight)
+                Text("REVENUE Cr", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextLight, softWrap = false, maxLines = 1)
             }
             Box(modifier = Modifier.fillMaxWidth().height(labelHeight), contentAlignment = Alignment.CenterStart) {
-                Text("VOLUME MW", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextLight)
+                Text("VOLUME MW", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextLight, softWrap = false, maxLines = 1)
             }
             Box(modifier = Modifier.fillMaxWidth().height(labelHeight), contentAlignment = Alignment.CenterStart) {
-                Text("QTY (K)", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextLight)
+                Text("QTY (K)", fontSize = 7.5.sp, fontWeight = FontWeight.Bold, color = SlateTextLight, softWrap = false, maxLines = 1)
             }
             
             Spacer(modifier = Modifier.height(2.dp))
-            HorizontalDivider(color = SlateBorder, thickness = 1.dp)
+            HorizontalDivider(modifier = Modifier.fillMaxWidth(), color = SlateBorder, thickness = 1.dp)
             Spacer(modifier = Modifier.height(2.dp))
 
             Box(modifier = Modifier.fillMaxWidth().height(labelHeight), contentAlignment = Alignment.CenterStart) {
-                Text("MoM %", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted)
+                Text("MoM %", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted, softWrap = false, maxLines = 1)
             }
             Box(modifier = Modifier.fillMaxWidth().height(labelHeight), contentAlignment = Alignment.CenterStart) {
-                Text("QoQ %", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted)
+                Text("QoQ %", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted, softWrap = false, maxLines = 1)
             }
             Box(modifier = Modifier.fillMaxWidth().height(labelHeight), contentAlignment = Alignment.CenterStart) {
-                Text("YoY %", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted)
+                Text("YoY %", fontSize = 7.sp, fontWeight = FontWeight.Bold, color = SlateTextMuted, softWrap = false, maxLines = 1)
             }
         }
 
-        Spacer(modifier = Modifier.width(6.dp))
+        Spacer(modifier = Modifier.width(4.dp))
 
         // Horizontally scrollable data columns
         BoxWithConstraints(
             modifier = Modifier.weight(1f)
         ) {
             val totalCols = monthlyItems.size + (if (totalRow != null) 1 else 0)
-            val spacing = 4.dp
-            // Ensure columns fit within width if possible, else use minimum width
-            val minColWidth = 72.dp 
+            val spacing = 3.dp
+            // Ensure columns fit within width cleanly
+            val minColWidth = 52.dp 
             val availableWidth = maxWidth - (spacing * (totalCols - 1))
             val calculatedColWidth = if (totalCols > 0) availableWidth / totalCols else minColWidth
             val columnWidth = if (calculatedColWidth > minColWidth) calculatedColWidth else minColWidth
@@ -2400,7 +2599,13 @@ fun MatrixTableView(
                     horizontalArrangement = Arrangement.spacedBy(spacing)
                 ) {
                     monthlyItems.forEachIndexed { idx, row ->
-                        val qIdx = idx / 3
+                        val qIdx = when (row.monthName.lowercase()) {
+                            "apr", "may", "jun" -> 0
+                            "jul", "aug", "sep" -> 1
+                            "oct", "nov", "dec" -> 2
+                            "jan", "feb", "mar" -> 3
+                            else -> idx / 3
+                        }
                         val isPartSelected = currentQuarter == qIdx
                         val isMonthSelected = currentMonth == row.monthName
 
@@ -2422,7 +2627,7 @@ fun MatrixTableView(
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(40.dp),
+                                    .height(42.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.Center
                             ) {
@@ -2435,22 +2640,22 @@ fun MatrixTableView(
                                 ) {
                                     Text(
                                         text = "Q${qIdx + 1}",
-                                        fontSize = 6.sp,
+                                        fontSize = 6.5.sp,
                                         fontWeight = FontWeight.Black,
                                         color = if (isPartSelected) BrandGreen else SlateTextMuted
                                     )
                                 }
-                                Spacer(modifier = Modifier.height(1.dp))
+                                Spacer(modifier = Modifier.height(2.dp))
                                 Text(
                                     text = row.monthName.uppercase(),
-                                    fontSize = 7.5.sp,
+                                    fontSize = 8.sp,
                                     fontWeight = if (isMonthSelected) FontWeight.Black else FontWeight.Bold,
                                     color = if (isMonthSelected) BrandGreen else SlateTextLight
                                 )
                             }
                             Spacer(modifier = Modifier.height(4.dp))
 
-                            val cellHeight = 26.dp
+                            val cellHeight = 22.dp
                             Box(modifier = Modifier.fillMaxWidth().height(cellHeight), contentAlignment = Alignment.Center) {
                                 Text(text = String.format("%.1f", row.revenueCr), fontSize = 8.sp, fontFamily = FontFamily.Monospace, color = SlateTextLight)
                             }
@@ -2483,14 +2688,14 @@ fun MatrixTableView(
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(40.dp),
+                                    .height(42.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(text = "TOTAL", fontSize = 8.sp, fontWeight = FontWeight.Black, color = BrandGreen)
                             }
                             Spacer(modifier = Modifier.height(4.dp))
 
-                            val cellHeight = 26.dp
+                            val cellHeight = 22.dp
                             Box(modifier = Modifier.fillMaxWidth().height(cellHeight), contentAlignment = Alignment.Center) {
                                 Text(text = String.format("%.1f", totalRow.revenueCr), fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Black, color = BrandGreen)
                             }

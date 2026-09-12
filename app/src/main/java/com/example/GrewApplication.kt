@@ -9,11 +9,14 @@ import io.github.jan.supabase.realtime.Realtime
 
 class GrewApplication : Application() {
     companion object {
+        lateinit var instance: GrewApplication
+            private set
         lateinit var supabase: SupabaseClient
     }
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         supabase = createSupabaseClient(
             supabaseUrl = BuildConfig.SUPABASE_URL,
             supabaseKey = BuildConfig.SUPABASE_ANON_KEY
